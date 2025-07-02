@@ -25,7 +25,7 @@ def make_argparser(parser=None):
     parser.add_argument('-tet', '--trans_model_type', type=str, default='continuous')
     parser.add_argument('-tev', '--trans_model_version', type=str, default='1')
     parser.add_argument('-d', '--device', type=str, default='cuda')
-    parser.add_argument('-ne', '--epochs', type=int, default=100)
+    parser.add_argument('-ne', '--epochs', type=int, default=1)
     parser.add_argument('-tne', '--trans_epochs', type=int, default=None)
     parser.add_argument('-b', '--batch_size', type=int, default=2048)
     parser.add_argument('-l', '--log_freq', type=int, default=100)

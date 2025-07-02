@@ -227,6 +227,11 @@ class ContinuousTransitionModel(nn.Module):
               return_stoch_logits: bool = False):
     x = x.view(x.shape[0], self.input_dim)
     processed_acts = self.prepare_acts(acts)
+    if acts.dim() == 1:
+      acts = acts.unsqueeze(-1)  # Convert from [batch_size] to [batch_size, 1]
+
+    processed_acts = acts  # or whatever processing you do to acts
+
     input_embeds = torch.cat([x, processed_acts], dim=1)
 
     if self.stochastic == 'categorical':

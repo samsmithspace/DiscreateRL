@@ -84,6 +84,8 @@ def mlp(hidden_sizes, activation='relu', discrete_input=False, n_embeds=None, em
   for i, (s1, s2) in enumerate(zip(hidden_sizes[:-1], hidden_sizes[1:])):
     if i > 0:
       s1 = s1 * input_multiplier
+    # Convert to int to handle numpy types
+    s1, s2 = int(s1), int(s2)
     layers.append(nn.Linear(s1, s2))
     layers.append(activation_cls())
   return nn.Sequential(*layers[:-1])
