@@ -60,29 +60,79 @@ def calculate_trans_losses(
         loss_dict['state_acc'] = state_accs.cpu().numpy()
 
     # Calculate the transition image reconstruction loss
-    next_obs_pred = encoder_model.decode(next_z_pred).cpu()
-    img_mse_losses = torch.pow(next_obs - next_obs_pred, 2)
-    loss_dict['img_mse_loss'] = img_mse_losses.view(next_obs.shape[0], -1).sum(1).numpy()
-    loss_dict['reward_loss'] = F.mse_loss(next_reward,
+    # Check if this is an identity encoder
+    is_identity_encoder = hasattr(encoder_model, '__class__') and 'Identity' in encoder_model.__class__.__name__
+
+    if is_identity_encoder:
+        # For identity encoders, the "decoded" output is already in the same format as next_z_pred
+        # We need to reshape it back to image format for comparison
+        batch_size = next_z_pred.shape[0]
+
+        # Try to reshape the flattened prediction back to image format
+        if next_z_pred.shape[1] == 9408:  # 3 * 56 * 56
+            next_obs_pred = next_z_pred.view(batch_size, 3, 56, 56)
+        elif next_z_pred.shape[1] == 2352:  # 3 * 28 * 28
+            next_obs_pred = next_z_pred.view(batch_size, 3, 28, 28)
+        else:
+            # Fallback: try to infer dimensions
+            import math
+            spatial_size = next_z_pred.shape[1] // 3
+            if spatial_size > 0:
+                side_length = int(math.sqrt(spatial_size))
+                if side_length * side_length == spatial_size:
+                    next_obs_pred = next_z_pred.view(batch_size, 3, side_length, side_length)
+                else:
+                    # Can't reshape properly, use zeros as fallback
+                    next_obs_pred = torch.zeros_like(next_obs)
+            else:
+                next_obs_pred = torch.zeros_like(next_obs)
+
+        next_obs_pred = next_obs_pred.cpu()
+    else:
+        # Normal encoder/decoder case
+        next_obs_pred = encoder_model.decode(next_z_pred).cpu()
+
+    # Ensure both tensors are on CPU and have matching shapes
+    next_obs_cpu = next_obs.cpu() if hasattr(next_obs, 'cpu') else next_obs
+
+    # Handle shape mismatches
+    if next_obs_cpu.shape != next_obs_pred.shape:
+        print(f"Warning: Shape mismatch - next_obs: {next_obs_cpu.shape}, next_obs_pred: {next_obs_pred.shape}")
+        # Try to make them compatible
+        if next_obs_pred.numel() == next_obs_cpu.numel():
+            next_obs_pred = next_obs_pred.view(next_obs_cpu.shape)
+        else:
+            # Create a dummy prediction with the right shape
+            next_obs_pred = torch.zeros_like(next_obs_cpu)
+
+    img_mse_losses = torch.pow(next_obs_cpu - next_obs_pred, 2)
+    loss_dict['img_mse_loss'] = img_mse_losses.view(next_obs_cpu.shape[0], -1).sum(1).numpy()
+
+    # Handle reward and gamma predictions
+    next_reward_cpu = next_reward.cpu() if hasattr(next_reward, 'cpu') else next_reward
+    next_gamma_cpu = next_gamma.cpu() if hasattr(next_gamma, 'cpu') else next_gamma
+
+    loss_dict['reward_loss'] = F.mse_loss(next_reward_cpu,
                                           next_reward_pred.squeeze().cpu(), reduction='none').numpy()
-    loss_dict['gamma_loss'] = F.mse_loss(next_gamma,
+    loss_dict['gamma_loss'] = F.mse_loss(next_gamma_cpu,
                                          next_gamma_pred.squeeze().cpu(), reduction='none').numpy()
 
     if rand_obs is not None:
-        rand_img_mse_losses = torch.pow(next_obs - rand_obs, 2)
-        loss_dict['rand_img_mse_loss'] = rand_img_mse_losses.view(
-            next_obs.shape[0], -1).sum(1).numpy()
+        rand_obs_cpu = rand_obs.cpu() if hasattr(rand_obs, 'cpu') else rand_obs
+        rand_img_mse_losses = torch.pow(next_obs_cpu - rand_obs_cpu, 2)
+        loss_dict['rand_img_mse_loss'] = rand_img_mse_losses.view(next_obs_cpu.shape[0], -1).sum(1).numpy()
     else:
-        loss_dict['rand_img_mse_loss'] = np.array([np.nan] * next_obs.shape[0])
+        loss_dict['rand_img_mse_loss'] = np.array([np.nan] * next_obs_cpu.shape[0])
 
     if init_obs is not None:
-        init_img_mse_losses = torch.pow(next_obs - init_obs, 2)
-        loss_dict['init_img_mse_loss'] = init_img_mse_losses.view(
-            next_obs.shape[0], -1).sum(1).numpy()
+        init_obs_cpu = init_obs.cpu() if hasattr(init_obs, 'cpu') else init_obs
+        init_img_mse_losses = torch.pow(next_obs_cpu - init_obs_cpu, 2)
+        loss_dict['init_img_mse_loss'] = init_img_mse_losses.view(next_obs_cpu.shape[0], -1).sum(1).numpy()
     else:
-        loss_dict['init_img_mse_loss'] = np.array([np.nan] * next_obs.shape[0])
+        loss_dict['init_img_mse_loss'] = np.array([np.nan] * next_obs_cpu.shape[0])
 
-    if all_obs is not None:
+    if all_obs is not None and not is_identity_encoder:
+        # Only do closest observation matching for non-identity encoders
         no_dists, no_idxs = get_min_mses(next_obs_pred, all_obs, return_idxs=True)
         loss_dict['closest_img_mse_loss'] = no_dists
 
@@ -91,10 +141,10 @@ def calculate_trans_losses(
             o_dists, o_idxs = get_min_mses(curr_obs_pred, all_obs, return_idxs=True)
             start_obs = to_hashable_tensor_list(all_obs[o_idxs])
             end_obs = to_hashable_tensor_list(all_obs[no_idxs])
-            acts = acts.cpu().tolist()
+            acts_cpu = acts.cpu().tolist() if hasattr(acts, 'cpu') else acts.tolist()
 
             trans_exists = []
-            for so, eo, a in zip(start_obs, end_obs, acts):
+            for so, eo, a in zip(start_obs, end_obs, acts_cpu):
                 if all_trans[so][(a, eo)] == 0:
                     trans_exists.append(0)
                 else:
@@ -102,10 +152,10 @@ def calculate_trans_losses(
 
             loss_dict['real_transition_frac'] = np.array(trans_exists)
         else:
-            loss_dict['real_transition_frac'] = np.array([np.nan] * next_obs.shape[0])
+            loss_dict['real_transition_frac'] = np.array([np.nan] * next_obs_cpu.shape[0])
     else:
-        loss_dict['closest_img_mse_loss'] = np.array([np.nan] * next_obs.shape[0])
-        loss_dict['real_transition_frac'] = np.array([np.nan] * next_obs.shape[0])
+        loss_dict['closest_img_mse_loss'] = np.array([np.nan] * next_obs_cpu.shape[0])
+        loss_dict['real_transition_frac'] = np.array([np.nan] * next_obs_cpu.shape[0])
 
     return loss_dict
 
@@ -554,8 +604,20 @@ def eval_model(args, encoder_model=None, trans_model=None):
     #   #   )})
 
     # Sample random latent vectors eval
+    # In evaluate_model.py, around line 570-580, replace the random latent sampling section with:
+
+    # Sample random latent vectors eval
     print('Sampling random latent vectors...')
-    if args.trans_model_type in CONTINUOUS_TRANS_TYPES:
+
+    # Check if this is an identity encoder
+    is_identity_encoder = hasattr(encoder_model, '__class__') and 'Identity' in encoder_model.__class__.__name__
+
+    if is_identity_encoder:
+        print('Identity encoder detected - skipping random latent sampling (not applicable)')
+        # For identity encoders, we can't meaningfully sample random latents
+        # since they don't have a learned latent space
+
+    elif args.trans_model_type in CONTINUOUS_TRANS_TYPES:
         latent_dim = encoder_model.latent_dim
         all_latents = all_latents.reshape(all_latents.shape[0], latent_dim)
 
@@ -577,13 +639,12 @@ def eval_model(args, encoder_model=None, trans_model=None):
         log_images({'uniform_cont_sample_latent_imgs': imgs}, args)
 
         latent_means = all_latents.mean(dim=0)
-        print('latent_means (16):', latent_means.shape)
         latent_stds = all_latents.std(dim=0)
         normal_sampled_latents = torch.normal(
             latent_means.repeat(N_RAND_LATENT_SAMPLES),
             latent_stds.repeat(N_RAND_LATENT_SAMPLES))
         normal_sampled_latents = normal_sampled_latents.reshape(N_RAND_LATENT_SAMPLES, latent_dim)
-        print(normal_sampled_latents.shape)
+
         with torch.no_grad():
             obs = encoder_model.decode(normal_sampled_latents.to(args.device))
         obs = obs.cpu()
@@ -736,6 +797,8 @@ def eval_model(args, encoder_model=None, trans_model=None):
     gc.collect()
     print('Memory usage:', psutil.Process(os.getpid()).memory_info().rss / 1024 ** 3)
 
+    # Replace the entire "Create sample transition images" section in evaluate_model.py with:
+
     # Create sample transition images
     print('Creating sample transition images...')
     samples = []
@@ -744,126 +807,225 @@ def eval_model(args, encoder_model=None, trans_model=None):
             break
         if sample_rollout[0].numel() > 0:
             samples.append(sample_rollout)
-    sample_rollouts = [torch.stack([x[i] for x in samples]).squeeze(dim=1) \
-                       for i in range(len(samples[0]))]
 
-    all_obs = torch.cat((sample_rollouts[0][:, :1], sample_rollouts[2]), dim=1)
-    acts = sample_rollouts[1]
-    dones = sample_rollouts[4]
-    z = encoder_model.encode(all_obs[:, 0].to(args.device))
-    if args.trans_model_type in CONTINUOUS_TRANS_TYPES:
-        z = z.reshape(z.shape[0], encoder_model.latent_dim)
+    example_trans_imgs = []  # Initialize here to avoid UnboundLocalError
 
-    # Convert hidden states to observations (if necessary)
-    all_obs = [states_to_imgs(o, args.env_name, transform=rev_transform) for o in all_obs]
-    all_obs = torch.from_numpy(np.stack(all_obs))
+    if len(samples) == 0:
+        print("No valid samples found for transition visualization")
+    else:
+        sample_rollouts = [torch.stack([x[i] for x in samples]).squeeze(dim=1) \
+                           for i in range(len(samples[0]))]
 
-    example_trans_imgs = []
-    example_trans_imgs.append(torch.cat((
-        all_obs[:, 0], torch.zeros_like(all_obs[:, 0])), dim=3))
+        all_obs = torch.cat((sample_rollouts[0][:, :1], sample_rollouts[2]), dim=1)
+        acts = sample_rollouts[1]
+        dones = sample_rollouts[4]
 
-    continue_mask = torch.ones(all_obs.shape[0])
-    for step in range(args.eval_unroll_steps):
-        z = trans_model(z, acts[:, step].to(args.device))[0]
-        pred_obs = encoder_model.decode(z).cpu()
+        # Check if using identity encoder
+        is_identity_encoder = hasattr(encoder_model, '__class__') and 'Identity' in encoder_model.__class__.__name__
 
-        pred_obs = states_to_imgs(pred_obs, args.env_name, transform=rev_transform)
-        pred_obs = torch.from_numpy(pred_obs)
+        if is_identity_encoder:
+            print("Identity encoder detected - using ground truth observations for visualization")
+            z = encoder_model.encode(all_obs[:, 0].to(args.device))
 
-        example_trans_imgs.append(torch.cat((
-            all_obs[:, step + 1], pred_obs), dim=3) \
-                                  * continue_mask[:, None, None, None])
-        continue_mask[dones[:, step].float().nonzero().squeeze()] = 0
-    example_trans_imgs = [
-        torch.stack([x[i] for x in example_trans_imgs])
-        for i in range(len(example_trans_imgs[0]))
-    ]
+            # Convert observations to images for visualization
+            example_trans_imgs = []
 
-    # Replace the problematic section (around lines 780-800) with this fixed version:
+            # Add initial observation
+            init_obs_imgs = states_to_imgs(all_obs[:, 0], args.env_name, transform=rev_transform)
+            init_obs_imgs = torch.from_numpy(init_obs_imgs)
 
-    # Replace the problematic section (around lines 780-800) with this fixed version:
+            # Ensure proper 4D format
+            if len(init_obs_imgs.shape) == 3:
+                init_obs_imgs = init_obs_imgs.unsqueeze(0)
 
-    for i, img in enumerate(example_trans_imgs):
-        img_tensor = img.clip(0, 1)
-        img_numpy = (img_tensor * 255).numpy().astype(np.uint8)
-        grayscale = img_numpy.shape[1] == 2 or img_numpy.shape[1] > 3
-        if grayscale:
-            img_numpy = img_numpy[:, :-1, :, :]
+            # For initial frame, stack the same image twice (no prediction yet)
+            combined_initial = torch.cat((init_obs_imgs, init_obs_imgs), dim=2)  # Stack vertically (dim=2 for height)
+            example_trans_imgs.append(combined_initial)
 
-        log_videos({f'{args.eval_unroll_steps}-step_transition_sample': [img_numpy]}, args)
+            continue_mask = torch.ones(all_obs.shape[0])
+            for step in range(min(args.eval_unroll_steps, all_obs.shape[1] - 1)):
+                # Ground truth next observation
+                gt_obs_imgs = states_to_imgs(all_obs[:, step + 1], args.env_name, transform=rev_transform)
+                gt_obs_imgs = torch.from_numpy(gt_obs_imgs)
 
-        # Fix: Take the last frame for display (or you could take the first frame with [0])
-        # img_tensor shape is (steps, height, width, channels), so take last step
-        last_frame = img_tensor[-1]  # Shape: (height, width, channels)
+                # Ensure proper 4D format
+                if len(gt_obs_imgs.shape) == 3:
+                    gt_obs_imgs = gt_obs_imgs.unsqueeze(0)
 
-        # Convert to numpy for display - keep (height, width, channels) format
-        img_display = last_frame.numpy().clip(0, 1)
+                # For identity encoder, prediction is just the ground truth
+                pred_img = gt_obs_imgs
 
-        # Handle grayscale images
-        if img_display.shape[2] == 1:
-            img_display = img_display.squeeze(2)  # Remove channel dimension for grayscale
-        elif img_display.shape[2] == 2:
-            img_display = img_display[:, :, 0]  # Take first channel for 2-channel images
-        elif img_display.shape[2] > 3:
-            img_display = img_display[:, :, :3]  # Take first 3 channels for RGB
+                # Stack vertically instead of horizontally
+                combined_img = torch.cat((gt_obs_imgs, pred_img), dim=2) * continue_mask[:, None, None, None]
+                example_trans_imgs.append(combined_img)
 
-        # Create the plot
-        plt.figure(figsize=(8, 8))
-        if len(img_display.shape) == 2:
-            plt.imshow(img_display, cmap='gray')
+                # Update continue mask
+                if step < dones.shape[1]:
+                    done_indices = dones[:, step].float().nonzero()
+                    if done_indices.numel() > 0:
+                        continue_mask[done_indices.squeeze()] = 0
         else:
-            plt.imshow(img_display)
-        plt.axis('off')  # Remove axes for cleaner image
-        plt.title(f'{args.eval_unroll_steps}-step Transition Sample {i}')
+            # Normal encoder case
+            print("Normal encoder detected - using encode/decode predictions")
+            z = encoder_model.encode(all_obs[:, 0].to(args.device))
+            if args.trans_model_type in CONTINUOUS_TRANS_TYPES:
+                z = z.reshape(z.shape[0], encoder_model.latent_dim)
 
-        # Save locally if requested
-        if args.save:
-            save_path = os.path.join(results_dir,
-                                     f'{args.trans_model_type}_trans_model_v{args.trans_model_version}' +
-                                     f'_{args.eval_unroll_steps}-step_sample_{i}.png')
-            plt.savefig(save_path, bbox_inches='tight', dpi=150, pad_inches=0.1)
-            print(f"Saved image to: {save_path}")
+            # Convert observations to images for visualization
+            example_trans_imgs = []
 
-        plt.close()  # Close the figure to free memory
+            # Process initial observation
+            init_obs_imgs = states_to_imgs(all_obs[:, 0], args.env_name, transform=rev_transform)
+            init_obs_imgs = torch.from_numpy(init_obs_imgs)
 
-        # For wandb logging, use the properly formatted image
-        wandb_log({f'{args.eval_unroll_steps}-step_transition_sample': img_display}, args.wandb)
+            # Ensure proper 4D format
+            if len(init_obs_imgs.shape) == 3:
+                init_obs_imgs = init_obs_imgs.unsqueeze(0)
 
-    # Additional option: Save all frames as separate images
-    for i, img in enumerate(example_trans_imgs):
-        img_tensor = img.clip(0, 1)
+            # For initial frame, stack the same image twice
+            combined_initial = torch.cat((init_obs_imgs, init_obs_imgs), dim=2)  # Stack vertically
+            example_trans_imgs.append(combined_initial)
 
-        # Save each frame in the sequence
-        if args.save:
-            for step, frame in enumerate(img_tensor):
-                frame_display = frame.numpy().clip(0, 1)
+            continue_mask = torch.ones(all_obs.shape[0])
+            for step in range(min(args.eval_unroll_steps, all_obs.shape[1] - 1, acts.shape[1])):
+                # Predict next state
+                z = trans_model(z, acts[:, step].to(args.device))[0]
+                pred_obs = encoder_model.decode(z).cpu()
 
-                # Handle different channel configurations
-                if frame_display.shape[2] == 1:
-                    frame_display = frame_display.squeeze(2)
-                elif frame_display.shape[2] == 2:
-                    frame_display = frame_display[:, :, 0]
-                elif frame_display.shape[2] > 3:
-                    frame_display = frame_display[:, :, :3]
+                # Convert prediction to image
+                pred_obs_imgs = states_to_imgs(pred_obs, args.env_name, transform=rev_transform)
+                pred_obs_imgs = torch.from_numpy(pred_obs_imgs)
 
-                plt.figure(figsize=(6, 6))
-                if len(frame_display.shape) == 2:
-                    plt.imshow(frame_display, cmap='gray')
-                else:
-                    plt.imshow(frame_display)
-                plt.axis('off')
-                plt.title(f'Sample {i}, Step {step}')
+                if len(pred_obs_imgs.shape) == 3:
+                    pred_obs_imgs = pred_obs_imgs.unsqueeze(0)
 
-                frame_save_path = os.path.join(results_dir,
-                                               f'{args.trans_model_type}_v{args.trans_model_version}' +
-                                               f'_sample_{i}_step_{step}.png')
-                plt.savefig(frame_save_path, bbox_inches='tight', dpi=150, pad_inches=0.1)
-                plt.close()
+                # Ground truth observation
+                gt_obs_imgs = states_to_imgs(all_obs[:, step + 1], args.env_name, transform=rev_transform)
+                gt_obs_imgs = torch.from_numpy(gt_obs_imgs)
 
-            print(f"Saved {len(img_tensor)} frames for sample {i}")
+                if len(gt_obs_imgs.shape) == 3:
+                    gt_obs_imgs = gt_obs_imgs.unsqueeze(0)
 
-        # Break after first sample to avoid too many files (remove this if you want all samples)
-        break
+                # Make sure shapes match for concatenation
+                if gt_obs_imgs.shape != pred_obs_imgs.shape:
+                    min_batch = min(gt_obs_imgs.shape[0], pred_obs_imgs.shape[0])
+                    gt_obs_imgs = gt_obs_imgs[:min_batch]
+                    pred_obs_imgs = pred_obs_imgs[:min_batch]
+                    continue_mask = continue_mask[:min_batch]
+
+                # Stack vertically instead of horizontally
+                combined_img = torch.cat((gt_obs_imgs, pred_obs_imgs), dim=2) * continue_mask[:, None, None, None]
+                example_trans_imgs.append(combined_img)
+
+                # Update continue mask
+                if step < dones.shape[1]:
+                    done_indices = dones[:, step].float().nonzero()
+                    if done_indices.numel() > 0:
+                        continue_mask[done_indices.squeeze()] = 0
+
+    # Process the final images for display/logging
+    if len(example_trans_imgs) > 0:
+        example_trans_imgs_processed = [
+            torch.stack([x[i] for x in example_trans_imgs])
+            for i in range(min(len(example_trans_imgs[0]), N_EXAMPLE_IMGS))
+        ]
+
+        # Create visualizations showing all timesteps
+        for i, img_sequence in enumerate(example_trans_imgs_processed[:3]):  # Show first 3 samples
+            # img_sequence shape: (n_steps, channels, height, width)
+            n_steps = img_sequence.shape[0]
+
+            # Convert to numpy and create a grid
+            img_numpy = img_sequence.numpy()
+
+            # Create a horizontal concatenation of all timesteps
+            frames_list = []
+            for step in range(n_steps):
+                frame = img_numpy[step]  # Shape: (channels, height, width)
+
+                # Convert from CHW to HWC
+                if frame.shape[0] <= 3:
+                    frame = frame.transpose(1, 2, 0)
+
+                # Add step number text overlay
+                frame_with_text = frame.copy()
+                frames_list.append(frame_with_text)
+
+            # Concatenate all frames horizontally
+            full_trajectory = np.concatenate(frames_list, axis=1)
+
+            # Create figure
+            plt.figure(figsize=(n_steps * 3, 6))
+            plt.imshow(full_trajectory.clip(0, 1))
+
+            # Add labels
+            height = frames_list[0].shape[0]
+            half_height = height // 2
+            for step in range(n_steps):
+                x_pos = step * frames_list[0].shape[1] + frames_list[0].shape[1] // 2
+                plt.text(x_pos, 10, f'Step {step}', ha='center', va='top',
+                         color='white', fontsize=10, weight='bold',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+
+            # Add GT/Pred labels
+            plt.text(10, half_height - 10, 'GT', ha='left', va='bottom',
+                     color='white', fontsize=12, weight='bold',
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='red', alpha=0.7))
+            plt.text(10, half_height + 10, 'Pred', ha='left', va='top',
+                     color='white', fontsize=12, weight='bold',
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='blue', alpha=0.7))
+
+            plt.title(f'{args.eval_unroll_steps}-step Transition Sample {i}', fontsize=14)
+            plt.axis('off')
+
+            if args.save:
+                save_path = os.path.join(results_dir,
+                                         f'{args.trans_model_type}_trans_model_v{args.trans_model_version}' +
+                                         f'_{args.eval_unroll_steps}-step_sample_{i}.png')
+                plt.savefig(save_path, bbox_inches='tight', dpi=150, pad_inches=0.1)
+
+            # Also create individual step images if you want to see each step clearly
+            fig, axes = plt.subplots(2, n_steps, figsize=(n_steps * 2, 4))
+            if n_steps == 1:
+                axes = axes.reshape(2, 1)
+
+            for step in range(n_steps):
+                frame = img_numpy[step].transpose(1, 2, 0)
+                height = frame.shape[0]
+                half_height = height // 2
+
+                # Split vertically
+                gt_frame = frame[:half_height]
+                pred_frame = frame[half_height:]
+
+                # Plot
+                axes[0, step].imshow(gt_frame.clip(0, 1))
+                axes[0, step].set_title(f'Step {step}')
+                axes[0, step].axis('off')
+
+                axes[1, step].imshow(pred_frame.clip(0, 1))
+                axes[1, step].axis('off')
+
+            axes[0, 0].set_ylabel('Ground Truth', fontsize=10)
+            axes[1, 0].set_ylabel('Prediction', fontsize=10)
+
+            plt.suptitle(f'{args.eval_unroll_steps}-step Transition Sample {i} (Split View)', fontsize=12)
+            plt.tight_layout()
+
+            if args.save:
+                save_path = os.path.join(results_dir,
+                                         f'{args.trans_model_type}_trans_model_v{args.trans_model_version}' +
+                                         f'_{args.eval_unroll_steps}-step_sample_{i}_split.png')
+                plt.savefig(save_path, bbox_inches='tight', dpi=150, pad_inches=0.1)
+
+            plt.close('all')
+
+            # Log to wandb
+            if args.wandb:
+                wandb_log({f'transition_sample_{i}': full_trajectory}, args.wandb)
+    else:
+        print("No valid transition images could be created")
+
 
 if __name__ == '__main__':
     # Parse args

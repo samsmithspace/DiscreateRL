@@ -47,11 +47,12 @@ def train_encoder(args):
     if hasattr(model, 'disable_sparsity'):
         model.disable_sparsity()
 
-    if args.epochs <= 0:
+    # Check if training is needed
+    if args.epochs <= 0 or trainer is None:
+        print('No training required for this model type or epochs=0')
         return model
-    
-    if trainer is not None:
-        trainer.recon_loss_clip = args.recon_loss_clip
+
+    trainer.recon_loss_clip = args.recon_loss_clip
     model = model.to(args.device)
     print('# Params:', sum([x.numel() for x in model.parameters()]))
     print(model)
@@ -80,13 +81,13 @@ def train_encoder(args):
                 **log_stats},
                 args, prefix='encoder', step=ENCODER_STEP)
             train_log_buffer = defaultdict(float)
-        
+
         ENCODER_STEP += 1
 
     env = make_env(args.env_name, max_steps=args.env_max_steps)
     # For reversing observation transformations
     rev_transform = valid_loader.dataset.flat_rev_obs_transform
-    
+
     def valid_callback(valid_data, batch_idx, epoch):
         global ENCODER_STEP
         log_metrics({
@@ -117,11 +118,14 @@ def train_encoder(args):
     global train_log_buffer
     del train_log_buffer
 
-    # Test the model
-    print('Starting model evaluation...')
-    test_losses = test_model(model, trainer.calculate_losses, test_loader)
-    test_losses = {k: np.mean([d[k].item() for d in test_losses]) for k in test_losses[0].keys()}
-    print(f'Encoder test loss: {test_losses}')
+    # Test the model (only if trainer exists)
+    if trainer is not None:
+        print('Starting model evaluation...')
+        test_losses = test_model(model, trainer.calculate_losses, test_loader)
+        test_losses = {k: np.mean([d[k].item() for d in test_losses]) for k in test_losses[0].keys()}
+        print(f'Encoder test loss: {test_losses}')
+    else:
+        print('Skipping model evaluation (no trainer for this model type)')
 
     if args.save:
         save_model(model, args, model_hash=args.ae_model_hash)

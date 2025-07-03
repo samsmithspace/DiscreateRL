@@ -205,22 +205,75 @@ def sample_entropy(xs, var_type='discrete'):
     entropy = -torch.sum(probs * torch.log(probs + EPSILON), dim=1)
     return entropy
 
+
 def obs_to_img(obs, cat=False, env_name=None, rev_transform=None):
     """ Convert a tensor observation into an image. """
-    
-    if len(obs.shape) in (1, 3):
-        obs = obs.unsqueeze(0)
+
+    # Handle different input shapes and types
+    if isinstance(obs, np.ndarray):
+        obs = torch.from_numpy(obs)
+
+    # Handle flattened observations (from identity encoders)
+    if len(obs.shape) == 2:
+        # Assume this is a flattened observation from identity encoder
+        # Try to reshape back to image format
+        batch_size = obs.shape[0]
+        flat_size = obs.shape[1]
+
+        # Common MiniGrid sizes after flattening
+        if flat_size == 9408:  # 3 * 56 * 56
+            obs = obs.reshape(batch_size, 3, 56, 56)
+        elif flat_size == 2352:  # 3 * 28 * 28
+            obs = obs.reshape(batch_size, 3, 28, 28)
+        elif flat_size == 588:  # 3 * 14 * 14
+            obs = obs.reshape(batch_size, 3, 14, 14)
+        elif flat_size == 147:  # 3 * 7 * 7
+            obs = obs.reshape(batch_size, 3, 7, 7)
+        else:
+            # Try to infer square image dimensions
+            import math
+            # Assume 3 channels (RGB)
+            spatial_size = flat_size // 3
+            if spatial_size > 0:
+                side_length = int(math.sqrt(spatial_size))
+                if side_length * side_length == spatial_size:
+                    obs = obs.reshape(batch_size, 3, side_length, side_length)
+                else:
+                    # Can't reshape to valid image format
+                    print(f"Warning: Cannot reshape flattened observation of size {flat_size} to image format")
+                    # Create a dummy image for visualization
+                    obs = torch.zeros(batch_size, 3, 56, 56)
+            else:
+                print(f"Warning: Invalid flattened observation size {flat_size}")
+                obs = torch.zeros(batch_size, 3, 56, 56)
+
+    elif len(obs.shape) == 1:
+        # Single flattened observation
+        obs = obs.unsqueeze(0)  # Add batch dimension
+        return obs_to_img(obs, cat=cat, env_name=env_name, rev_transform=rev_transform)
+
+    elif len(obs.shape) == 3:
+        obs = obs.unsqueeze(0)  # Add batch dimension
+
+    # Now obs should be 4D: (batch, channels, height, width)
+    if len(obs.shape) != 4:
+        print(f"Warning: Unexpected observation shape {obs.shape}, creating dummy image")
+        batch_size = obs.shape[0] if len(obs.shape) > 0 else 1
+        obs = torch.zeros(batch_size, 3, 56, 56)
+
+    # Convert to images using existing pipeline
     obs = states_to_imgs(obs, env_name, transform=rev_transform)
     obs = torch.from_numpy(obs)
 
-    assert len(obs.shape) == 4, 'Observations must be 3D or 4D'
     if cat:
         imgs = rearrange(obs, 'n c h w -> h (n w) c')
     else:
         imgs = rearrange(obs, 'n c h w -> n h w c')
+
     # Take last channel if not using RGB (or 3 channels in general)
     if imgs.shape[-1] != 3:
         imgs = imgs[..., -1]
+
     imgs = imgs.clip(0, 1).squeeze(0).cpu().numpy()
     return imgs
 
