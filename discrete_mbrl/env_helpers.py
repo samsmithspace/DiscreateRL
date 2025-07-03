@@ -17,7 +17,29 @@ from minigrid.wrappers import RGBImgPartialObsWrapper, ImgObsWrapper, ReseedWrap
 from minigrid.wrappers import FullyObsWrapper
 from minigrid.core.constants import OBJECT_TO_IDX
 
-from gymnasium.wrappers import AtariPreprocessing, FrameStack, TransformObservation, TransformReward
+# FIXED IMPORT: Use the correct import paths for newer Gymnasium
+try:
+    # Try the newer API first
+    from gymnasium.wrappers import FrameStackObservation as FrameStack
+except ImportError:
+    try:
+        # Fallback to older API
+        from gymnasium.wrappers import FrameStack
+    except ImportError:
+        # Final fallback - create a dummy class to prevent import errors
+        print("Warning: Could not import FrameStack, creating dummy wrapper")
+
+
+        class FrameStack:
+            def __init__(self, env, num_stack):
+                self.env = env
+                self.num_stack = num_stack
+                print(f"Warning: FrameStack wrapper not available, using original env")
+
+            def __getattr__(self, name):
+                return getattr(self.env, name)
+
+from gymnasium.wrappers import AtariPreprocessing, TransformObservation, TransformReward
 from gymnasium.wrappers.flatten_observation import FlattenObservation
 from gymnasium.core import ObservationWrapper
 import torch
@@ -28,11 +50,14 @@ Transition = namedtuple('Transition', ('obs', 'action', 'next_obs', 'reward', 'd
 
 DATA_DIR = './data'  # '/mnt/z/data'
 
+
 class SeedCompatWrapper(Wrapper):
     def reset(self, seed=None, **kwargs):
         if seed is not None:
             self.env.seed(seed)
         return self.env.reset(**kwargs)
+
+
 # Wrapper for gym environments that stores trajectories and saves them to a buffer
 class TrajectoryRecorderWrapper(Wrapper):
     def __init__(self, env, external_buffer, buffer_lock, extra_info=None):
@@ -759,7 +784,7 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
     if env_name.lower() == 'minigrid-simple-stochastic':
         wrappers = [
             lambda env: MiniGridSimpleStochActionWrapper(env, n_acts=3),
-            MinigridRGBImgObsWrapper,
+            MinigridRGBImsWrapper,
             ImgObsWrapper,
             Custom2DWrapper
         ]
@@ -970,4 +995,3 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
         env = wrapper(env)
     env = SeedCompatWrapper(env)
     return env
-    #return env
