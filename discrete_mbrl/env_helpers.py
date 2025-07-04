@@ -20,16 +20,14 @@ from minigrid.core.constants import OBJECT_TO_IDX
 # FIXED IMPORT: Use the correct import paths for newer Gymnasium
 try:
     # Try the newer API first
-    from gymnasium.wrappers import FrameStackObservation as FrameStack
+    from gymnasium.wrappers import FrameStack
 except ImportError:
     try:
         # Fallback to older API
-        from gymnasium.wrappers import FrameStack
+        from gymnasium.wrappers.frame_stack import FrameStack
     except ImportError:
         # Final fallback - create a dummy class to prevent import errors
         print("Warning: Could not import FrameStack, creating dummy wrapper")
-
-
         class FrameStack:
             def __init__(self, env, num_stack):
                 self.env = env
@@ -39,8 +37,26 @@ except ImportError:
             def __getattr__(self, name):
                 return getattr(self.env, name)
 
+# FIXED IMPORT: FlattenObservation moved location
+try:
+    from gymnasium.wrappers import FlattenObservation
+except ImportError:
+    try:
+        from gymnasium.wrappers.flatten_observation import FlattenObservation
+    except ImportError:
+        try:
+            from gymnasium.wrappers.vector import FlattenObservation
+        except ImportError:
+            print("Warning: Could not import FlattenObservation, creating dummy wrapper")
+            class FlattenObservation:
+                def __init__(self, env):
+                    self.env = env
+                    print(f"Warning: FlattenObservation wrapper not available, using original env")
+
+                def __getattr__(self, name):
+                    return getattr(self.env, name)
+
 from gymnasium.wrappers import AtariPreprocessing, TransformObservation, TransformReward
-from gymnasium.wrappers.flatten_observation import FlattenObservation
 from gymnasium.core import ObservationWrapper
 import torch
 from stable_baselines3.common.monitor import Monitor
@@ -54,7 +70,13 @@ DATA_DIR = './data'  # '/mnt/z/data'
 class SeedCompatWrapper(Wrapper):
     def reset(self, seed=None, **kwargs):
         if seed is not None:
-            self.env.seed(seed)
+            try:
+                # Try new API first
+                self.env.reset(seed=seed, **kwargs)
+            except TypeError:
+                # Fall back to old API
+                self.env.seed(seed)
+                return self.env.reset(**kwargs)
         return self.env.reset(**kwargs)
 
 
@@ -73,8 +95,8 @@ class TrajectoryRecorderWrapper(Wrapper):
         for _ in range(len(self.extra_info)):
             self.ep_buffer.append([])
 
-    def reset(self):
-        reset_result = self.env.reset()
+    def reset(self, **kwargs):
+        reset_result = self.env.reset(**kwargs)
         if isinstance(reset_result, tuple):
             # New gym API returns (observation, info)
             self.last_obs, info = reset_result
@@ -708,7 +730,9 @@ class RandomReseedWrapper(Wrapper):
         if self._episode_idx % self.n_repeat == 0:
             self._seed = np.random.randint(0, int(1e9))
         self._episode_idx += 1
-        reset_result = self.env.reset(seed=self._seed, **kwargs)
+        # Use the newer reset API with seed parameter
+        kwargs['seed'] = self._seed
+        reset_result = self.env.reset(**kwargs)
         if isinstance(reset_result, tuple):
             return reset_result
         else:
@@ -784,7 +808,7 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
     if env_name.lower() == 'minigrid-simple-stochastic':
         wrappers = [
             lambda env: MiniGridSimpleStochActionWrapper(env, n_acts=3),
-            MinigridRGBImsWrapper,
+            MinigridRGBImgObsWrapper,
             ImgObsWrapper,
             Custom2DWrapper
         ]
@@ -962,7 +986,8 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
             # MujocoObsWrapper,
             lambda env: TransformObservation(env, torch.FloatTensor)
         ]
-        env = gym.make(env_name, new_step_api=False, width=120, height=120)
+        # Updated to use new API
+        env = gym.make(env_name, width=120, height=120)
     elif env_name in MUJOCO_VISUAL_ENVS:
         os.environ['MUJOCO_GL'] = 'osmesa'
         wrappers = [
@@ -972,7 +997,8 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
             lambda env: TransformObservation(env, torch.FloatTensor),
             SqueezeDimWrapper
         ]
-        env = gym.make(env_name[:-7], new_step_api=False, width=60, height=60)
+        # Updated to use new API
+        env = gym.make(env_name[:-7], width=60, height=60)
     else:
         wrappers = [
             lambda env: AtariPreprocessing(env, scale_obs=True),

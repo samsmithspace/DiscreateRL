@@ -258,44 +258,68 @@ class ReplayDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        if isinstance(idx, slice):
-            idx = list(range(idx.start, idx.stop, idx.step or 1))
-        elif isinstance(idx, range):
-            idx = list(idx)
-        elif isinstance(idx, torch.Tensor):
-            idx = idx.tolist()
-        
-        if self.preload:
-            obs = self.data_buffer['obs'][idx]
-            action = self.data_buffer['action'][idx]
-            next_obs = self.data_buffer['next_obs'][idx]
-            reward = self.data_buffer['reward'][idx]
-            done = self.data_buffer['done'][idx]
-            extra_data = [self.data_buffer[key][idx] \
-                for key in self.extra_keys]
+        """
+        Fixed version that handles numpy boolean indexing issues
+        """
+        with h5py.File(self.replay_buffer_path, 'r') as buffer:
+            # Ensure idx is an integer
+            if isinstance(idx, (np.bool_, bool, np.integer)):
+                idx = int(idx)
+
+            # Load data with proper type handling
+            obs = torch.tensor(buffer['obs'][idx]).float()
+
+            # Handle action data type
+            action_data = buffer['action'][idx]
+            if buffer['action'].dtype in ['int32', 'int64']:
+                action = torch.tensor(action_data).long()
+            else:
+                action = torch.tensor(action_data).float()
+
+            next_obs = torch.tensor(buffer['next_obs'][idx]).float()
+            reward = torch.tensor(buffer['reward'][idx]).float()
+
+            # Fix done boolean handling
+            done_data = buffer['done'][idx]
+            if isinstance(done_data, (np.bool_, bool)):
+                done = torch.tensor(float(done_data))
+            elif hasattr(done_data, 'dtype') and done_data.dtype == bool:
+                done = torch.tensor(float(done_data))
+            else:
+                done = torch.tensor(done_data).float()
+
+            # Handle extra buffer keys
+            extra_data = []
+            for key in self.extra_buffer_keys:
+                if key in buffer:
+                    value = buffer[key][idx]
+                    if isinstance(value, (np.bool_, bool)):
+                        extra_data.append(torch.tensor(float(value)))
+                    elif hasattr(value, 'dtype') and value.dtype == bool:
+                        extra_data.append(torch.tensor(float(value)))
+                    else:
+                        extra_data.append(torch.tensor(value).float())
+
+            # Apply transform if available
+            if self.transform:
+                obs = self.transform(obs)
+                next_obs = self.transform(next_obs)
+
+            if len(extra_data) > 0:
+                return obs, action, next_obs, reward, done, *extra_data
+            else:
+                return obs, action, next_obs, reward, done
+
+    def safe_tensor_conversion(data, dtype=torch.float):
+        """
+        Safely convert data to tensor, handling numpy boolean types
+        """
+        if isinstance(data, (np.bool_, bool)):
+            return torch.tensor(float(data), dtype=dtype)
+        elif hasattr(data, 'dtype') and data.dtype == bool:
+            return torch.tensor(data.astype(float), dtype=dtype)
         else:
-            with h5py.File(self.replay_buffer_path, 'r') as buffer:
-                obs = torch.from_numpy(buffer['obs'][idx]).float()
-                action = torch.tensor(buffer['action'][idx]).to(self.act_type)
-                next_obs = torch.from_numpy(buffer['next_obs'][idx]).float()
-                reward = torch.tensor(buffer['reward'][idx]).float()
-                done = torch.tensor(buffer['done'][idx]).float()
-                extra_data = [torch.tensor(buffer[key][idx]) \
-                    for key in self.extra_keys]
-
-        if isinstance(idx, list):
-            obs = self.obs_transform(obs)
-            next_obs = self.obs_transform(next_obs)
-        else:
-            obs = self.flat_obs_transform(obs)
-            next_obs = self.flat_obs_transform(next_obs)
-
-        if self.transform:
-            obs, action, next_obs, reward, done = \
-                self.transform(obs, action, next_obs, reward, done)
-
-        return obs, action, next_obs, reward, done, *extra_data
-
+            return torch.tensor(data, dtype=dtype)
 # Source: https://towardsdatascience.com/reading-h5-files-faster-with-pytorch-datasets-3ff86938cc
 class NStepWeakBatchSampler(Sampler):
     def __init__(self, dataset, batch_size, n_steps, shuffle=False):
