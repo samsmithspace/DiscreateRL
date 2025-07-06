@@ -920,17 +920,9 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
         env.unwrapped.max_steps = max_steps or 10000
     elif 'minigrid' in env_name.lower():
         scale_wrapper = Custom2DWrapper
-        if '-fullobs' in env_name:
-            env_name = env_name.replace('-fullobs', '')
-            img_wrapper = MinigridRGBImgObsWrapper
-        elif '-compactobs' in env_name:
-            env_name = env_name.replace('-compactobs', '')
-            img_wrapper = CompactObsWrapper
-            scale_wrapper = lambda env: RescaleWrapper(
-                env, np.array([[[0, 0]]]), np.array([[[10, 3]]]))
-            # Axis 0: [0, 10], 1: 0, 2: [0, 3]
-        else:
-            img_wrapper = RGBImgPartialObsWrapper
+
+        #img_wrapper = RGBImgPartialObsWrapper
+        img_wrapper = MinigridRGBImgObsWrapper
         wrappers = [
             img_wrapper,
             ImgObsWrapper,

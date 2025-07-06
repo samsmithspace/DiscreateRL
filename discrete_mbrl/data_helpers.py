@@ -259,7 +259,7 @@ class ReplayDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Fixed version that handles numpy boolean indexing issues
+        Fixed version that handles all numpy array conversion issues
         """
         with h5py.File(self.replay_buffer_path, 'r') as buffer:
             # Ensure idx is an integer
@@ -279,26 +279,64 @@ class ReplayDataset(Dataset):
             next_obs = torch.tensor(buffer['next_obs'][idx]).float()
             reward = torch.tensor(buffer['reward'][idx]).float()
 
-            # Fix done boolean handling
+            # Fix done boolean handling with comprehensive error handling
             done_data = buffer['done'][idx]
-            if isinstance(done_data, (np.bool_, bool)):
-                done = torch.tensor(float(done_data))
-            elif hasattr(done_data, 'dtype') and done_data.dtype == bool:
-                done = torch.tensor(float(done_data))
-            else:
-                done = torch.tensor(done_data).float()
 
-            # Handle extra buffer keys
+            def safe_convert_to_float(data):
+                """Helper to safely convert any data to float"""
+                try:
+                    # Handle boolean types
+                    if isinstance(data, (np.bool_, bool)):
+                        return float(data)
+
+                    # Handle numpy arrays with bool dtype
+                    if hasattr(data, 'dtype') and data.dtype == bool:
+                        # Convert to float array first, then extract
+                        float_data = data.astype(float)
+                        if np.isscalar(float_data):
+                            return float(float_data)
+                        elif float_data.size == 1:
+                            return float(float_data.flat[0])
+                        else:
+                            return float(float_data.flat[0])  # Take first element
+
+                    # Handle scalar values
+                    if np.isscalar(data):
+                        return float(data)
+
+                    # Handle arrays
+                    if hasattr(data, '__len__'):
+                        if len(data) == 0:
+                            return 0.0
+                        elif len(data) == 1:
+                            # Single element - use flat indexing to avoid .item() issues
+                            if hasattr(data, 'flat'):
+                                return float(data.flat[0])
+                            else:
+                                return float(data[0])
+                        else:
+                            # Multi-element array - take first element
+                            if hasattr(data, 'flat'):
+                                return float(data.flat[0])
+                            else:
+                                return float(data[0])
+
+                    # Try direct conversion
+                    return float(data)
+
+                except (TypeError, ValueError, IndexError) as e:
+                    print(f"Warning: Could not convert {type(data)} to float: {e}")
+                    print(f"Data: {data}")
+                    return 0.0  # Default fallback
+
+            done = torch.tensor(safe_convert_to_float(done_data))
+
+            # Handle extra buffer keys using the same helper
             extra_data = []
-            for key in self.extra_buffer_keys:
+            for key in self.extra_keys:
                 if key in buffer:
                     value = buffer[key][idx]
-                    if isinstance(value, (np.bool_, bool)):
-                        extra_data.append(torch.tensor(float(value)))
-                    elif hasattr(value, 'dtype') and value.dtype == bool:
-                        extra_data.append(torch.tensor(float(value)))
-                    else:
-                        extra_data.append(torch.tensor(value).float())
+                    extra_data.append(torch.tensor(safe_convert_to_float(value)))
 
             # Apply transform if available
             if self.transform:
@@ -310,16 +348,8 @@ class ReplayDataset(Dataset):
             else:
                 return obs, action, next_obs, reward, done
 
-    def safe_tensor_conversion(data, dtype=torch.float):
-        """
-        Safely convert data to tensor, handling numpy boolean types
-        """
-        if isinstance(data, (np.bool_, bool)):
-            return torch.tensor(float(data), dtype=dtype)
-        elif hasattr(data, 'dtype') and data.dtype == bool:
-            return torch.tensor(data.astype(float), dtype=dtype)
-        else:
-            return torch.tensor(data, dtype=dtype)
+
+
 # Source: https://towardsdatascience.com/reading-h5-files-faster-with-pytorch-datasets-3ff86938cc
 class NStepWeakBatchSampler(Sampler):
     def __init__(self, dataset, batch_size, n_steps, shuffle=False):
