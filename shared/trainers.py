@@ -156,11 +156,26 @@ class AETrainer(BaseRepresentationLearner):
     obs = torch.cat(
       [batch_data[0][:sample_size],
        batch_data[2][sample_size:]], dim=0).to(device)
-    
+
     if self.model.encoder_type == 'fta_ae':
       obs_recon, latent_means, _ = self.model(obs, return_all=True)
     else:
       obs_recon = self.model(obs)
+
+    # Handle spatial dimension mismatches between input and reconstruction
+    if obs.shape != obs_recon.shape:
+      import torch.nn.functional as F
+      #print(f"Dimension mismatch detected: input {obs.shape} vs reconstruction {obs_recon.shape}")
+      #print("Resizing reconstruction to match input dimensions...")
+
+      # Resize reconstruction to match input spatial dimensions
+      obs_recon = F.interpolate(
+        obs_recon,
+        size=obs.shape[-2:],  # Use spatial dimensions of input
+        mode='bilinear',
+        align_corners=False
+      )
+      #print(f"After resizing: reconstruction shape {obs_recon.shape}")
 
     recon_loss = (obs - obs_recon) ** 2
     if self.recon_loss_clip > 0:
@@ -179,7 +194,7 @@ class AETrainer(BaseRepresentationLearner):
         stats['non_zero_latent_frac'] = mean_non_zero
 
       return loss_dict, stats
-    
+
     return loss_dict
 
   def train(self, batch_data):

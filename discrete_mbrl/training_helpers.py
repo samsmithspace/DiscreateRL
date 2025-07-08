@@ -252,55 +252,55 @@ def sample_recon_imgs(model, dataloader, n=4, env_name=None, rev_transform=None)
     return sample_recons
 
 
-def sample_recon_seqs(encoder, trans_model, dataloader, n_steps, n=4,
-                      env_name=None, rev_transform=None, gif_format=False):
+def sample_recon_imgs(model, dataloader, n=4, env_name=None, rev_transform=None):
     # Generate sample reconstructions
-    encoder.eval()
-    trans_model.eval()
-    device = next(encoder.parameters()).device
-    sample_batch = next(iter(dataloader))
-    sample_batch = [x[:n].to(device) for x in sample_batch]
-    if n_steps <= 1:
-        # Add dummy dimension for single step prediction
-        sample_batch = [x[:, None] for x in sample_batch]
-    obs, acts, next_obs = sample_batch[:3]
-    init_obs = obs[:, 0]  # First step of each sequence
-    z = encoder.encode(init_obs)
+    model.eval()
 
-    # Check if this is an identity encoder (no actual encoding/decoding)
-    is_identity_encoder = hasattr(encoder, '__class__') and 'Identity' in encoder.__class__.__name__
-
-    if is_identity_encoder:
-        # For identity encoders, just use the original observations
-        # since there's no meaningful reconstruction to show
-        print("Identity encoder detected - using original observations for visualization")
-
-        # Create a simple sequence showing original observations
-        dec_steps = [init_obs]
-        for i in range(n_steps):
-            # For identity encoder, just use the ground truth next observations
-            if i < next_obs.shape[1]:
-                dec_steps.append(next_obs[:, i])
-            else:
-                # If we run out of ground truth, repeat the last observation
-                dec_steps.append(next_obs[:, -1])
-
-        all_obs = torch.cat([obs[:, :1], next_obs], dim=1)
-
-        # Convert to proper format for visualization
-        dec_steps_tensor = torch.stack(dec_steps)
-
+    # Check if dataloader has iter method
+    if isinstance(dataloader, DataLoader):
+        samples = next(iter(dataloader))[0][:n]
+    elif isinstance(dataloader, torch.Tensor):
+        samples = dataloader[:n]
+    elif isinstance(dataloader, (list, tuple)):
+        samples = torch.stack(dataloader[:n])
     else:
-        # Normal encoder/decoder logic
-        dec_steps = [torch.zeros_like(init_obs)]
-        for i in range(n_steps):
-            with torch.no_grad():
-                z = trans_model(z, acts[:, i])[0]
-                decoded = encoder.decode(z)
-            dec_steps.append(decoded)
+        raise ValueError(f'Invalid dataloader type: {type(dataloader)}!')
 
-        all_obs = torch.cat([obs[:, :1], next_obs], dim=1)
-        dec_steps_tensor = torch.stack(dec_steps)
+    device = next(model.parameters()).device
+    with torch.no_grad():
+        encs = model.encode(samples.to(device))
+        decs = model.decode(encs)
+
+    # Handle spatial dimension mismatches between input and reconstruction
+    if samples.shape != decs.shape:
+        import torch.nn.functional as F
+        print(f"Dimension mismatch in sample_recon_imgs: input {samples.shape} vs reconstruction {decs.shape}")
+        print("Resizing reconstruction to match input dimensions...")
+
+        # Resize reconstruction to match input spatial dimensions
+        decs = F.interpolate(
+            decs,
+            size=samples.shape[-2:],  # Use spatial dimensions of input
+            mode='bilinear',
+            align_corners=False
+        )
+        print(f"After resizing: reconstruction shape {decs.shape}")
+
+    # Convert states to images
+    samples = states_to_imgs(samples, env_name, transform=rev_transform)
+    samples = torch.from_numpy(samples)
+
+    decs = states_to_imgs(decs, env_name, transform=rev_transform)
+    decs = torch.from_numpy(decs)
+
+    sample_recons = torch.cat([samples, decs.cpu()], dim=3)
+    sample_recons = sample_recons.clip(0, 1)
+    if samples.shape[1] == 1 or samples.shape[1] == 3:
+        sample_recons = sample_recons.permute(0, 2, 3, 1).numpy()
+    else:
+        srs = sample_recons.shape
+        sample_recons = sample_recons.reshape(srs[0] * srs[1], *srs[2:]).numpy()
+    return sample_recons
 
     # Convert states to images
     orig_shape = dec_steps_tensor.shape[:2]
