@@ -470,6 +470,9 @@ class DisallowActionWrapper(gym.ActionWrapper):
 # Modified version of RGBImgObsWrapper from Minigrid
 # Replace the MinigridRGBImgObsWrapper class with this updated version:
 
+# Replace the entire MinigridRGBImgObsWrapper class in env_helpers.py
+# Find this class around line 480 and replace it completely
+
 class MinigridRGBImgObsWrapper(ObservationWrapper):
     """
     Wrapper to use fully observable RGB image as observation,
@@ -482,10 +485,14 @@ class MinigridRGBImgObsWrapper(ObservationWrapper):
         self.tile_size = tile_size
         self.highlight = highlight
 
+        # Access the underlying MiniGrid environment through unwrapped
+        # This bypasses any intermediate wrappers like OrderEnforcing
+        minigrid_env = self.unwrapped
+
         new_image_space = gym.spaces.Box(
             low=0,
             high=255,
-            shape=(self.env.width * tile_size, self.env.height * tile_size, 3),
+            shape=(minigrid_env.width * tile_size, minigrid_env.height * tile_size, 3),
             dtype='uint8',
         )
 
@@ -496,12 +503,12 @@ class MinigridRGBImgObsWrapper(ObservationWrapper):
         env = self.unwrapped
 
         # Updated render call for new minigrid API
-        # In MinigridRGBImgObsWrapper.observation():
         rgb_img = env.get_full_render(highlight=self.highlight, tile_size=self.tile_size)
 
         return {**obs, 'image': rgb_img}
 
 
+# Also fix the CompactObsWrapper if it has similar issues
 class CompactObsWrapper(gym.ObservationWrapper):
     """
     Fully observable gridworld using a compact grid encoding
@@ -511,7 +518,10 @@ class CompactObsWrapper(gym.ObservationWrapper):
         super().__init__(env)
         self.depth = 3 if include_color else 2
 
-        obs_shape = (self.env.width, self.env.height, self.depth)
+        # Use unwrapped to access MiniGrid-specific attributes
+        minigrid_env = self.unwrapped
+        obs_shape = (minigrid_env.width, minigrid_env.height, self.depth)
+
         low = np.zeros(obs_shape, dtype=np.float32)
         high = np.ones(obs_shape, dtype=np.float32)
         high[:, :, 0] *= 10  # OBJECT_TO_IDX
@@ -559,6 +569,106 @@ class CompactObsWrapper(gym.ObservationWrapper):
             obs[agent_pos[0], agent_pos[1]] = 0
 
         return obs, (agent_pos, agent_dir)
+
+
+# And fix UltraCompactObsWrapper if it exists
+class UltraCompactObsWrapper(gym.ObservationWrapper):
+    """
+    Fully observable gridworld using a compact encoding
+    """
+
+    def __init__(self, env, key=False, door=False):
+        super().__init__(env)
+        self.is_key = key
+        self.is_door = door
+
+        self.key_pos = None
+        self.door_pos = None
+
+        # Use unwrapped to access MiniGrid-specific attributes
+        minigrid_env = self.unwrapped
+        self.codebook_size = max(minigrid_env.width, minigrid_env.height)
+
+        # x, y, agent_dir (x4), key, door locked, door open
+        obs_shape = (self.codebook_size, 3 + int(key) + 2 * int(door))
+        low = np.zeros(obs_shape, dtype=np.int64)
+        high = np.ones(obs_shape, dtype=np.int64)
+
+        new_image_space = gym.spaces.Box(
+            low=low, high=high, shape=obs_shape, dtype='int64')
+        self.observation_space = gym.spaces.Dict(
+            {**self.observation_space.spaces, "image": new_image_space}
+        )
+
+    def reset(self, **kwargs):
+        reset_result = super().reset(**kwargs)
+
+        # Get key and door pos
+        if self.is_key or self.is_door:
+            minigrid_env = self.unwrapped
+            for i in range(minigrid_env.width):
+                for j in range(minigrid_env.height):
+                    obj = minigrid_env.grid.get(i, j)
+                    if obj is not None and obj.type == 'door':
+                        self.door_pos = (i, j)
+                    elif obj is not None and obj.type == 'key':
+                        self.key_pos = (i, j)
+
+        if isinstance(reset_result, tuple):
+            obs, info = reset_result
+            return self.observation(obs), info
+        else:
+            return self.observation(reset_result)
+
+    def observation(self, obs):
+        env = self.unwrapped
+
+        x, y = env.agent_pos
+        agent_dir = env.agent_dir
+
+        compact_obs = [
+            np.eye(self.codebook_size)[elem]
+            for elem in (x, y, agent_dir)
+        ]
+
+        if self.is_key:
+            if self.key_pos is None:
+                compact_obs.append(np.eye(self.codebook_size)[0])
+            else:
+                obj = env.grid.get(*self.key_pos)
+                if obj is not None and obj.type == 'key':
+                    compact_obs.append(np.eye(self.codebook_size)[1])
+                else:
+                    compact_obs.append(np.eye(self.codebook_size)[0])
+
+        # Check locked or not, open or closed
+        if self.is_door:
+            if self.door_pos is None:
+                compact_obs.extend([
+                    np.eye(self.codebook_size)[0],
+                    np.eye(self.codebook_size)[0]
+                ])
+            else:
+                obj = env.grid.get(*self.door_pos)
+                if obj is not None and obj.type == 'door':
+                    if obj.is_locked:
+                        compact_obs.append(np.eye(self.codebook_size)[1])
+                    else:
+                        compact_obs.append(np.eye(self.codebook_size)[0])
+
+                    if obj.is_open:
+                        compact_obs.append(np.eye(self.codebook_size)[1])
+                    else:
+                        compact_obs.append(np.eye(self.codebook_size)[0])
+                else:
+                    compact_obs.extend([
+                        np.eye(self.codebook_size)[0],
+                        np.eye(self.codebook_size)[0]
+                    ])
+
+        compact_obs = np.array(compact_obs, dtype=np.int64).T
+
+        return {**obs, "image": compact_obs}
 
 
 class UltraCompactObsWrapper(gym.ObservationWrapper):
@@ -758,7 +868,7 @@ ENV_ALIASES = {
     'minigrid': 'MiniGrid-MultiRoom-N2-S4-v0',
     'minigrid-2-rooms': 'MiniGrid-MultiRoom-N2-S4-v0',
     'minigrid-4-rooms': 'MiniGrid-MultiRoom-N4-S5-v0',
-    'minigrid-empty': 'MiniGrid-Empty-6x6-v0',
+    'minigrid-empty': 'MiniGrid-Empty-5x5-v0',
     'breakout': 'BreakoutNoFrameskip-v4',
     'crazyclimber': 'CrazyClimberNoFrameskip-v4',
     'mspacman': 'MsPacmanNoFrameskip-v4'
@@ -802,6 +912,10 @@ MUJOCO_VISUAL_ENVS = [
 def check_env_name(env_name):
     return ENV_ALIASES.get(env_name, env_name)
 
+
+# Fixed section of env_helpers.py - around line 1000
+
+# Fixed section of env_helpers.py - around line 1000
 
 def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
              monitor=False, max_steps=None):
@@ -921,7 +1035,7 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
     elif 'minigrid' in env_name.lower():
         scale_wrapper = Custom2DWrapper
 
-        #img_wrapper = RGBImgPartialObsWrapper
+        # img_wrapper = RGBImgPartialObsWrapper
         img_wrapper = MinigridRGBImgObsWrapper
         wrappers = [
             img_wrapper,
@@ -999,17 +1113,21 @@ def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
         ]
         env = gym.make(env_name)
 
+    # Apply MiniGrid-specific wrappers FIRST, before other generic wrappers
+    for wrapper in wrappers:
+        env = wrapper(env)
+
+    # THEN apply generic wrappers that don't need MiniGrid-specific attributes
     # Clip the reward
     env = TransformReward(env, lambda r: np.clip(r, -1, 1))
+
     if monitor:
         env = Monitor(env)
 
     if replay_buffer is not None:
         recorder_wrapper = lambda env: TrajectoryRecorderWrapper(
             env, replay_buffer, buffer_lock, extra_info)
-        wrappers.append(recorder_wrapper)
+        env = recorder_wrapper(env)
 
-    for wrapper in wrappers:
-        env = wrapper(env)
     env = SeedCompatWrapper(env)
     return env
