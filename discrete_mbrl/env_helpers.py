@@ -868,7 +868,7 @@ ENV_ALIASES = {
     'minigrid': 'MiniGrid-MultiRoom-N2-S4-v0',
     'minigrid-2-rooms': 'MiniGrid-MultiRoom-N2-S4-v0',
     'minigrid-4-rooms': 'MiniGrid-MultiRoom-N4-S5-v0',
-    'minigrid-empty': 'MiniGrid-Empty-5x5-v0',
+    'minigrid-empty': 'MiniGrid-Empty-6x6-v0',
     'breakout': 'BreakoutNoFrameskip-v4',
     'crazyclimber': 'CrazyClimberNoFrameskip-v4',
     'mspacman': 'MsPacmanNoFrameskip-v4'

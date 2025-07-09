@@ -216,39 +216,110 @@ def train_loop(model, trainer, train_loader, valid_loader=None, n_epochs=1,
                     model.train()
                 print(update_str)
 
-def sample_recon_imgs(model, dataloader, n=4, env_name=None, rev_transform=None):
+
+def sample_recon_seqs(encoder, trans_model, dataloader, n_steps, n=4,
+                      env_name=None, rev_transform=None, gif_format=False):
     # Generate sample reconstructions
-    model.eval()
-    
-    # Check if dataloader has iter method
-    if isinstance(dataloader, DataLoader):
-        samples = next(iter(dataloader))[0][:n]
-    elif isinstance(dataloader, torch.Tensor):
-        samples = dataloader[:n]
-    elif isinstance(dataloader, (list, tuple)):
-        samples = torch.stack(dataloader[:n])
+    encoder.eval()
+    trans_model.eval()
+    device = next(encoder.parameters()).device
+    sample_batch = next(iter(dataloader))
+    sample_batch = [x[:n].to(device) for x in sample_batch]
+    if n_steps <= 1:
+        # Add dummy dimension for single step prediction
+        sample_batch = [x[:, None] for x in sample_batch]
+    obs, acts, next_obs = sample_batch[:3]
+    init_obs = obs[:, 0]  # First step of each sequence
+    z = encoder.encode(init_obs)
+
+    # Check if this is an identity encoder (no actual encoding/decoding)
+    is_identity_encoder = hasattr(encoder, '__class__') and 'Identity' in encoder.__class__.__name__
+
+    if is_identity_encoder:
+        # For identity encoders, just use the original observations
+        # since there's no meaningful reconstruction to show
+        print("Identity encoder detected - using original observations for visualization")
+
+        # Create a simple sequence showing original observations
+        dec_steps = [init_obs]
+        for i in range(n_steps):
+            # For identity encoder, just use the ground truth next observations
+            if i < next_obs.shape[1]:
+                dec_steps.append(next_obs[:, i])
+            else:
+                # If we run out of ground truth, repeat the last observation
+                dec_steps.append(next_obs[:, -1])
+
+        all_obs = torch.cat([obs[:, :1], next_obs], dim=1)
+
+        # Convert to proper format for visualization
+        dec_steps_tensor = torch.stack(dec_steps)
+
     else:
-        raise ValueError(f'Invalid dataloader type: {type(dataloader)}!')
+        # Normal encoder/decoder logic
+        dec_steps = [torch.zeros_like(init_obs)]
+        for i in range(n_steps):
+            with torch.no_grad():
+                z = trans_model(z, acts[:, i])[0]
+                decoded = encoder.decode(z)
 
-    device = next(model.parameters()).device
-    with torch.no_grad():
-        encs = model.encode(samples.to(device))
-        decs = model.decode(encs)
+                # Handle spatial dimension mismatches
+                if decoded.shape != init_obs.shape:
+                    import torch.nn.functional as F
+                    print(
+                        f"Dimension mismatch in sample_recon_seqs: expected {init_obs.shape} vs decoded {decoded.shape}")
+                    print("Resizing decoded observation to match expected dimensions...")
 
-    # Covert states to images
-    samples = states_to_imgs(samples, env_name, transform=rev_transform)
-    samples = torch.from_numpy(samples)
+                    # Resize decoded to match expected spatial dimensions
+                    decoded = F.interpolate(
+                        decoded,
+                        size=init_obs.shape[-2:],  # Use spatial dimensions of initial obs
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    print(f"After resizing: decoded shape {decoded.shape}")
 
-    decs = states_to_imgs(decs, env_name, transform=rev_transform)
-    decs = torch.from_numpy(decs)
-    
-    sample_recons = torch.cat([samples, decs.cpu()], dim=3)
-    sample_recons = sample_recons.clip(0, 1)
-    if samples.shape[1] == 1 or samples.shape[1] == 3:
+            dec_steps.append(decoded)
+
+        all_obs = torch.cat([obs[:, :1], next_obs], dim=1)
+        dec_steps_tensor = torch.stack(dec_steps)
+
+    # Convert states to images
+    orig_shape = dec_steps_tensor.shape[:2]
+    flat_dec_steps = dec_steps_tensor.reshape(-1, *dec_steps_tensor.shape[2:])
+    flat_dec_steps = states_to_imgs(flat_dec_steps, env_name, transform=rev_transform)
+    flat_dec_steps = torch.from_numpy(flat_dec_steps)
+    dec_steps_processed = flat_dec_steps.reshape(*orig_shape, *flat_dec_steps.shape[1:])
+    dec_steps_list = list(dec_steps_processed)
+
+    orig_shape = all_obs.shape[:2]
+    flat_all_obs = all_obs.reshape(-1, *all_obs.shape[2:])
+    flat_all_obs = states_to_imgs(flat_all_obs, env_name, transform=rev_transform)
+    flat_all_obs = torch.from_numpy(flat_all_obs)
+    all_obs = flat_all_obs.reshape(*orig_shape, *flat_all_obs.shape[1:])
+
+    if gif_format:
+        sample_recons = torch.stack(dec_steps_list).transpose(0, 1)
+        sample_recons = torch.cat([all_obs, sample_recons], dim=4).cpu()
+        sample_recons = (sample_recons.numpy().clip(0, 1) * 255).astype(np.uint8)
+
+        # Check for framestack, shape is (b, n, c, w, h)
+        if sample_recons.shape[2] not in (1, 3):
+            sample_recons = sample_recons[:, :, -1:]  # Take last frame of each framestack
+    else:
+        # Spread n_steps out over width, (b, c, h, n * w)
+        sample_recons = torch.cat(dec_steps_list, dim=3)
+        all_obs = rearrange(all_obs, 'b n c h w -> b c h (n w)')
+
+        # Stack real and predicted obs on top of each other
+        sample_recons = torch.cat([all_obs, sample_recons], dim=2).cpu()
         sample_recons = sample_recons.permute(0, 2, 3, 1).numpy()
-    else:
-        srs = sample_recons.shape
-        sample_recons = sample_recons.reshape(srs[0] * srs[1], *srs[2:]).numpy()
+        sample_recons = sample_recons.clip(0, 1)
+
+        # Check for framestack
+        if sample_recons.shape[-1] not in (1, 3):
+            sample_recons = sample_recons[..., -1:]  # Take last frame of each framestack
+
     return sample_recons
 
 

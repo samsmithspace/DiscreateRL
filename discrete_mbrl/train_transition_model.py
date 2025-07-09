@@ -94,10 +94,10 @@ def train_trans_model(args, encoder_model=None):
             args, prefix='trans', step=TRANS_STEP)
 
         if batch_idx == 0 and epoch % args.checkpoint_freq == 0:
-            valid_recons = sample_recon_imgs(
+            valid_recons = sample_recon_seqs(
                 encoder_model, trans_model, valid_loader, args.n_train_unroll,
                 env_name=args.env_name, rev_transform=rev_transform, gif_format=True)
-            train_recons = sample_recon_imgs(
+            train_recons = sample_recon_seqs(
                 encoder_model, trans_model, train_loader, args.n_train_unroll,
                 env_name=args.env_name, rev_transform=rev_transform, gif_format=True)
             log_videos({

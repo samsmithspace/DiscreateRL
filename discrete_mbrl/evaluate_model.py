@@ -5,6 +5,8 @@ import sys
 import time
 
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
+import gymnasium as gym
+from gymnasium.core import Wrapper
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -214,6 +216,22 @@ def update_losses(losses, new_losses, args, step, log=True):
     losses['step'].extend([step for _ in range(n_losses)])
 
 
+def safe_vec_env_step(vec_env, actions):
+    """Safely handle both old and new Gymnasium API step formats for vectorized envs"""
+    step_result = vec_env.step(actions)
+
+    if len(step_result) == 4:
+        # Old API: (obs, reward, done, info)
+        obs, reward, done, info = step_result
+        return obs, reward, done, info
+    elif len(step_result) == 5:
+        # New API: (obs, reward, terminated, truncated, info)
+        obs, reward, terminated, truncated, info = step_result
+        done = terminated | truncated  # Element-wise OR for arrays
+        return obs, reward, done, info
+    else:
+        raise ValueError(f"Unexpected step result length: {len(step_result)}")
+
 def eval_model(args, encoder_model=None, trans_model=None):
     import_logger(args)
 
@@ -351,7 +369,16 @@ def eval_model(args, encoder_model=None, trans_model=None):
                     for _ in range(args.eval_unroll_steps):
                         fobs = torch.from_numpy(obs).float().to(args.device)
                         act = policy.act(fobs).cpu().tolist()
-                        next_obs, _, done, infos = vec_env.step(act)
+                        step_result = vec_env.step(act)
+                        if len(step_result) == 4:
+                            # Old gym API: (obs, reward, done, info)
+                            obs, reward, done, info = safe_vec_env_step(vec_env, act)
+                        elif len(step_result) == 5:
+                            # New gymnasium API: (obs, reward, terminated, truncated, info)
+                            next_obs, rewards, terminated, truncated, infos = step_result
+                            done = terminated | truncated  # Combine terminated and truncated into done
+                        else:
+                            raise ValueError(f"Unexpected step result format: {len(step_result)} values")
 
                         for i, e in enumerate([obs, act, next_obs]):
                             transitions[i].append(e)
