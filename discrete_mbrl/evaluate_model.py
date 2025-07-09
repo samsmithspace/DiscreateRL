@@ -25,6 +25,9 @@ from model_construction import *
 from utils import *
 from eval_policies.policies import load_policy
 
+# Import resizing utilities
+from training_helpers import get_obs_target_size, batch_obs_resize, fast_obs_resize
+
 sns.set()
 
 GAMMA_CONST = 0.99
@@ -44,9 +47,13 @@ UNIQUE_OBS_EARLY_STOP = 1.0  # 0.2s
 def calculate_trans_losses(
         next_z, next_reward, next_gamma, next_z_pred_logits, next_z_pred, next_reward_pred,
         next_gamma_pred, next_obs, trans_model_type, encoder_model, rand_obs=None,
-        init_obs=None, all_obs=None, all_trans=None, curr_z=None, acts=None):
+        init_obs=None, all_obs=None, all_trans=None, curr_z=None, acts=None, env_name=None):
     # Calculate the transition reconstruction loss
     loss_dict = {}
+
+    # Get target size for resizing
+    target_size = get_obs_target_size(env_name) if env_name else None
+
     if trans_model_type in CONTINUOUS_TRANS_TYPES:
         assert next_z.shape == next_z_pred_logits.shape
         state_losses = torch.pow(next_z - next_z_pred_logits, 2)
@@ -97,14 +104,14 @@ def calculate_trans_losses(
     # Ensure both tensors are on CPU and have matching shapes
     next_obs_cpu = next_obs.cpu() if hasattr(next_obs, 'cpu') else next_obs
 
-    # Handle shape mismatches
+    # Handle shape mismatches with resizing
     if next_obs_cpu.shape != next_obs_pred.shape:
-        print(f"Warning: Shape mismatch - next_obs: {next_obs_cpu.shape}, next_obs_pred: {next_obs_pred.shape}")
-        # Try to make them compatible
-        if next_obs_pred.numel() == next_obs_cpu.numel():
+        if target_size and next_obs_pred.shape[-2:] != next_obs_cpu.shape[-2:]:
+            next_obs_pred = batch_obs_resize(next_obs_pred, target_size=next_obs_cpu.shape[-2:])
+        elif next_obs_pred.numel() == next_obs_cpu.numel():
             next_obs_pred = next_obs_pred.view(next_obs_cpu.shape)
         else:
-            # Create a dummy prediction with the right shape
+            print(f"Warning: Shape mismatch - next_obs: {next_obs_cpu.shape}, next_obs_pred: {next_obs_pred.shape}")
             next_obs_pred = torch.zeros_like(next_obs_cpu)
 
     img_mse_losses = torch.pow(next_obs_cpu - next_obs_pred, 2)
@@ -143,6 +150,7 @@ def calculate_trans_losses(
             o_dists, o_idxs = get_min_mses(curr_obs_pred, all_obs, return_idxs=True)
             start_obs = to_hashable_tensor_list(all_obs[o_idxs])
             end_obs = to_hashable_tensor_list(all_obs[no_idxs])
+
             acts_cpu = acts.cpu().tolist() if hasattr(acts, 'cpu') else acts.tolist()
 
             trans_exists = []
@@ -176,6 +184,8 @@ def wandb_log(items, do_log, make_gif=False):
             elif isinstance(v, Figure):
                 items[k] = wandb.Image(v)
         wandb.log(items)
+
+
 
 
 def save_and_log_imgs(imgs, label, results_dir, args):
@@ -232,12 +242,17 @@ def safe_vec_env_step(vec_env, actions):
     else:
         raise ValueError(f"Unexpected step result length: {len(step_result)}")
 
+
 def eval_model(args, encoder_model=None, trans_model=None):
     import_logger(args)
 
     # Randomize pytorch seed
     # Doing this because I was getting unintentially deterministic behavior
     torch.manual_seed(time.time())
+
+    # Get target size for this environment
+    target_size = get_obs_target_size(args.env_name) if not args.no_obs_resize else None
+    print(f"Target observation size for {args.env_name}: {target_size}")
 
     # Collect a set of all unique observations in the environment
     # Not recommended for complex environments
@@ -309,8 +324,13 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
             state_reprs = []
             for i in range(0, len(ordered_obs), args.eval_batch_size):
-                reprs = encoder_model.encode(
-                    ordered_obs[i:i + args.eval_batch_size].to(args.device))
+                batch_obs = ordered_obs[i:i + args.eval_batch_size].to(args.device)
+
+                # Resize if needed
+                if target_size:
+                    batch_obs = batch_obs_resize(batch_obs, env_name=args.env_name)
+
+                reprs = encoder_model.encode(batch_obs)
                 if args.trans_model_type in CONTINUOUS_TRANS_TYPES:
                     reprs = reprs.reshape(reprs.shape[0], encoder_model.latent_dim)
                 state_reprs.extend(list(reprs.cpu().detach().numpy()))
@@ -368,17 +388,14 @@ def eval_model(args, encoder_model=None, trans_model=None):
                     obs = vec_env.reset()
                     for _ in range(args.eval_unroll_steps):
                         fobs = torch.from_numpy(obs).float().to(args.device)
+
+                        # Resize observations if needed
+                        if target_size:
+                            fobs = batch_obs_resize(fobs, env_name=args.env_name)
+
                         act = policy.act(fobs).cpu().tolist()
-                        step_result = vec_env.step(act)
-                        if len(step_result) == 4:
-                            # Old gym API: (obs, reward, done, info)
-                            obs, reward, done, info = safe_vec_env_step(vec_env, act)
-                        elif len(step_result) == 5:
-                            # New gymnasium API: (obs, reward, terminated, truncated, info)
-                            next_obs, rewards, terminated, truncated, infos = step_result
-                            done = terminated | truncated  # Combine terminated and truncated into done
-                        else:
-                            raise ValueError(f"Unexpected step result format: {len(step_result)} values")
+                        obs, reward, done, info = safe_vec_env_step(vec_env, act)
+                        next_obs = obs
 
                         for i, e in enumerate([obs, act, next_obs]):
                             transitions[i].append(e)
@@ -423,8 +440,13 @@ def eval_model(args, encoder_model=None, trans_model=None):
             for batch_idx in tqdm(range(n_batches)):
                 pred_states = []
                 obs = vec_env.reset()
-                curr_states = encoder_model.encode(torch.from_numpy(obs) \
-                                                   .float().to(args.device))
+                obs_tensor = torch.from_numpy(obs).float().to(args.device)
+
+                # Resize if needed
+                if target_size:
+                    obs_tensor = batch_obs_resize(obs_tensor, env_name=args.env_name)
+
+                curr_states = encoder_model.encode(obs_tensor)
 
                 # Predict all states from the starting state
                 frozen_idxs = -torch.ones((len(obs),), device=args.device)
@@ -572,6 +594,7 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
             legend = plots[0].legend(
                 [plots[0].patches[0], plots[1].patches[0]],
+
                 ['Ground Truth', 'Simulated'],
                 loc='upper right',
                 bbox_to_anchor=(0.9, 1),
@@ -598,14 +621,38 @@ def eval_model(args, encoder_model=None, trans_model=None):
     n_samples = 0
     encoder_recon_loss = torch.tensor(0, dtype=torch.float64)
     all_latents = []
+
     for batch_data in test_loader:
         obs_data = batch_data[0]
         n_samples += obs_data.shape[0]
+
+        # Resize observations if needed before encoding
+        obs_data_device = obs_data.to(args.device)
+        if target_size and not getattr(encoder_model, 'no_resize', False):
+            obs_data_resized = batch_obs_resize(obs_data_device, env_name=args.env_name)
+        else:
+            obs_data_resized = obs_data_device
+
         with torch.no_grad():
-            latents = encoder_model.encode(obs_data.to(args.device))
+            latents = encoder_model.encode(obs_data_resized)
             recon_outputs = encoder_model.decode(latents)
             all_latents.append(latents.cpu())
-        encoder_recon_loss += torch.sum((recon_outputs.cpu() - obs_data) ** 2)
+
+        # Move reconstruction to CPU
+        recon_outputs = recon_outputs.cpu()
+
+        # Resize reconstruction back to original size if we resized the input
+        if target_size and obs_data.shape[-2:] != recon_outputs.shape[-2:]:
+            recon_outputs = batch_obs_resize(recon_outputs, target_size=obs_data.shape[-2:])
+
+        # Now both should have matching shapes
+        if recon_outputs.shape != obs_data.shape:
+            print(f"Warning: Shape mismatch after resize - recon: {recon_outputs.shape}, obs: {obs_data.shape}")
+            # Skip this batch if shapes still don't match
+            continue
+
+        encoder_recon_loss += torch.sum((recon_outputs - obs_data) ** 2)
+
     all_latents = torch.cat(all_latents, dim=0)
     encoder_recon_loss = (encoder_recon_loss / n_samples).item()
     print(f'Encoder reconstruction loss: {encoder_recon_loss:.2f}')
@@ -613,25 +660,6 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
     gc.collect()
     print('Memory usage:', psutil.Process(os.getpid()).memory_info().rss / 1024 ** 3)
-
-    # # Calculate symmetic uncertainty of discrete latents
-    # if args.trans_model_type in DISCRETE_TRANS_TYPES:
-    #   # This takes a large amount of memory
-    #   sym_uncertainty = sample_symmetric_uncertainty(all_latents)
-    #   import psutil; print('a:', psutil.virtual_memory()[3]/1e9)
-    #   mean_su = triu_avg(sym_uncertainty) # Avg SU of each latent variable pair
-    #   import psutil; print('a:', psutil.virtual_memory()[3]/1e9)
-    #   print(f'Mean symmetrical uncertainty: {mean_su:.3f}')
-    #   log_metrics({'mean_symmetrical_uncertainty': mean_su}, args)
-    #   # # Create heatmap of SU for visualization
-    #   # if args.wandb:
-    #   #   x_labels = y_labels = list(range(sym_uncertainty.shape[0]))
-    #   #   wandb.log({'symmetrical_uncertainty': wandb.plots.HeatMap(
-    #   #     x_labels, y_labels, sym_uncertainty.cpu().numpy(), show_text=False
-    #   #   )})
-
-    # Sample random latent vectors eval
-    # In evaluate_model.py, around line 570-580, replace the random latent sampling section with:
 
     # Sample random latent vectors eval
     print('Sampling random latent vectors...')
@@ -703,10 +731,23 @@ def eval_model(args, encoder_model=None, trans_model=None):
         sample_obs = sample_transition[0]
         if i >= N_EXAMPLE_IMGS:
             break
+
+        # Resize if needed
+        sample_obs_device = sample_obs.to(args.device)
+        if target_size:
+            sample_obs_resized = batch_obs_resize(sample_obs_device, env_name=args.env_name)
+        else:
+            sample_obs_resized = sample_obs_device
+
         with torch.no_grad():
-            recon_obs = encoder_model(sample_obs.to(args.device))
+            recon_obs = encoder_model(sample_obs_resized)
         if isinstance(recon_obs, tuple):
             recon_obs = recon_obs[0]
+
+        # Resize back if needed
+        if target_size and sample_obs.shape[-2:] != recon_obs.shape[-2:]:
+            recon_obs = batch_obs_resize(recon_obs, target_size=sample_obs.shape[-2:])
+
         both_obs = torch.cat([sample_obs, recon_obs.cpu()], dim=0)
         both_imgs = obs_to_img(both_obs, env_name=args.env_name, rev_transform=rev_transform)
         cat_img = np.concatenate([both_imgs[0], both_imgs[1]], axis=1)
@@ -738,7 +779,7 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
     print(f'Sampled {args.eval_unroll_steps}-step sub-trajectories')
 
-    # Caculate n-step statistics
+    # Calculate n-step statistics
     n_step_stats = dict(
         state_loss=[], state_acc=[], reward_loss=[],
         gamma_loss=[], img_mse_loss=[], rand_img_mse_loss=[],
@@ -754,7 +795,15 @@ def eval_model(args, encoder_model=None, trans_model=None):
         #   rand_obs = next(iter(alt_n_step_loader))[0][:obs.shape[0]]
         rand_obs = None
         gammas = (1 - dones) * GAMMA_CONST
-        z = encoder_model.encode(obs[:, 0].to(args.device))
+
+        # Resize observations if needed
+        obs_device = obs[:, 0].to(args.device)
+        if target_size:
+            obs_resized = batch_obs_resize(obs_device, env_name=args.env_name)
+        else:
+            obs_resized = obs_device
+
+        z = encoder_model.encode(obs_resized)
         if args.trans_model_type in DISCRETE_TRANS_TYPES:
             z_logits = F.one_hot(z, encoder_model.n_embeddings).permute(0, 2, 1).float() * 1e6
         else:
@@ -763,14 +812,23 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
         loss_dict = \
             calculate_trans_losses(z, rewards[:, 0], gammas[:, 0], z_logits, z,
+
+
                                    rewards[:, 0], gammas[:, 0], obs[:, 0], args.trans_model_type, encoder_model,
                                    rand_obs=rand_obs[:, 0] if rand_obs else None, init_obs=obs[:, 0],
-                                   all_obs=unique_obs)
+                                   all_obs=unique_obs, env_name=args.env_name)
         update_losses(n_step_stats, loss_dict, args, 0)
 
         keep_idxs = set(range(obs.shape[0]))
         for step in range(args.eval_unroll_steps):
-            next_z = encoder_model.encode(next_obs[:, step].to(args.device))
+            # Resize next observations if needed
+            next_obs_device = next_obs[:, step].to(args.device)
+            if target_size:
+                next_obs_resized = batch_obs_resize(next_obs_device, env_name=args.env_name)
+            else:
+                next_obs_resized = next_obs_device
+
+            next_z = encoder_model.encode(next_obs_resized)
             if args.trans_model_type in CONTINUOUS_TRANS_TYPES:
                 next_z = next_z.reshape(next_z.shape[0], encoder_model.latent_dim)
 
@@ -787,7 +845,7 @@ def eval_model(args, encoder_model=None, trans_model=None):
                 next_obs[:, step], args.trans_model_type, encoder_model,
                 rand_obs=rand_obs[:next_obs.shape[0], step] if rand_obs else None,
                 init_obs=obs[:, 0], all_obs=unique_obs, all_trans=trans_dict,
-                curr_z=z, acts=acts[:, step])
+                curr_z=z, acts=acts[:, step], env_name=args.env_name)
             update_losses(n_step_stats, loss_dict, args, step + 1)
 
             z = next_z_pred
@@ -823,8 +881,6 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
     gc.collect()
     print('Memory usage:', psutil.Process(os.getpid()).memory_info().rss / 1024 ** 3)
-
-    # Replace the entire "Create sample transition images" section in evaluate_model.py with:
 
     # Create sample transition images
     print('Creating sample transition images...')
@@ -894,7 +950,15 @@ def eval_model(args, encoder_model=None, trans_model=None):
         else:
             # Normal encoder case
             print("Normal encoder detected - using encode/decode predictions")
-            z = encoder_model.encode(all_obs[:, 0].to(args.device))
+
+            # Resize initial observation if needed
+            init_obs_device = all_obs[:, 0].to(args.device)
+            if target_size:
+                init_obs_resized = batch_obs_resize(init_obs_device, env_name=args.env_name)
+            else:
+                init_obs_resized = init_obs_device
+
+            z = encoder_model.encode(init_obs_resized)
             if args.trans_model_type in CONTINUOUS_TRANS_TYPES:
                 z = z.reshape(z.shape[0], encoder_model.latent_dim)
 
@@ -918,6 +982,10 @@ def eval_model(args, encoder_model=None, trans_model=None):
                 # Predict next state
                 z = trans_model(z, acts[:, step].to(args.device))[0]
                 pred_obs = encoder_model.decode(z).cpu()
+
+                # Resize prediction if needed
+                if target_size and pred_obs.shape[-2:] != all_obs[:, step + 1].shape[-2:]:
+                    pred_obs = batch_obs_resize(pred_obs, target_size=all_obs[:, step + 1].shape[-2:])
 
                 # Convert prediction to image
                 pred_obs_imgs = states_to_imgs(pred_obs, args.env_name, transform=rev_transform)
@@ -990,6 +1058,7 @@ def eval_model(args, encoder_model=None, trans_model=None):
             half_height = height // 2
             for step in range(n_steps):
                 x_pos = step * frames_list[0].shape[1] + frames_list[0].shape[1] // 2
+
                 plt.text(x_pos, 10, f'Step {step}', ha='center', va='top',
                          color='white', fontsize=10, weight='bold',
                          bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
@@ -1063,3 +1132,4 @@ if __name__ == '__main__':
     eval_model(args)
     # Clean up wandb
     finish_experiment(args)
+
