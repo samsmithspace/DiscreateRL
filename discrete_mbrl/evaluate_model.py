@@ -266,7 +266,16 @@ def eval_model(args, encoder_model=None, trans_model=None):
         unique_obs = None
     trans_dict = None  # Currently not used
 
-    env = make_env(args.env_name, max_steps=args.env_max_steps)
+    if 'minigrid' in args.env_name.lower() and '6x6' in args.env_name:
+        vec_env = DummyVecEnv([
+            lambda: FreezeOnDoneWrapper(make_env('minigrid-simple-stochastic', max_steps=args.env_max_steps))
+            for _ in range(args.eval_batch_size)
+        ])
+    else:
+        vec_env = DummyVecEnv([
+            lambda: FreezeOnDoneWrapper(make_env(args.env_name, max_steps=args.env_max_steps))
+            for _ in range(args.eval_batch_size)
+        ])
 
     ### Loading Models & Some Data ###
 
@@ -275,6 +284,41 @@ def eval_model(args, encoder_model=None, trans_model=None):
         args.env_name, 'test', batch_size=args.batch_size, preprocess=args.preprocess,
         randomize=False, n=args.max_transitions, n_preload=TEST_WORKERS, preload=args.preload_data,
         extra_buffer_keys=args.extra_buffer_keys)
+
+    print("=== DEBUG: Checking loaded observation format ===")
+    sample_batch = next(iter(test_loader))
+    sample_obs = sample_batch[0]
+    print(f"Loaded obs shape: {sample_obs.shape}")
+    print(f"Loaded obs dtype: {sample_obs.dtype}")
+    print(f"Loaded obs type: {type(sample_obs)}")
+    print(f"Loaded obs range: [{sample_obs.min():.3f}, {sample_obs.max():.3f}]")
+
+    # Visualize a few samples
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(1, min(4, sample_obs.shape[0]), figsize=(12, 3))
+    if len(axes.shape) == 0:  # Single subplot case
+        axes = [axes]
+
+    for i in range(min(4, sample_obs.shape[0])):
+        obs = sample_obs[i]
+        # Convert to numpy if it's a tensor
+        if hasattr(obs, 'numpy'):
+            obs = obs.numpy()
+
+        if obs.shape[0] <= 3:  # CHW format
+            obs_vis = obs.transpose(1, 2, 0)
+        else:  # HWC format
+            obs_vis = obs
+
+        axes[i].imshow(obs_vis.clip(0, 1))
+        axes[i].set_title(f"Sample {i}")
+        axes[i].axis('off')
+
+    plt.suptitle("Loaded Test Data Samples")
+    plt.tight_layout()
+    plt.savefig('debug_loaded_data.png')
+    plt.close()
+
     test_sampler = create_fast_loader(
         test_loader.dataset, batch_size=1, shuffle=True, num_workers=TEST_WORKERS, n_step=1)
     rev_transform = test_loader.dataset.flat_rev_obs_transform
@@ -342,6 +386,38 @@ def eval_model(args, encoder_model=None, trans_model=None):
 
         vec_env = DummyVecEnv([lambda: FreezeOnDoneWrapper(make_env(args.env_name, max_steps=args.env_max_steps)) \
                                for _ in range(args.eval_batch_size)])
+        # Add this right after creating vec_env in eval_model:
+        print("=== DEBUG: Checking live environment observations ===")
+        live_obs = vec_env.reset()
+        print(f"Live env obs shape: {live_obs.shape}")
+        print(f"Live env obs dtype: {live_obs.dtype}")
+        print(f"Live env obs type: {type(live_obs)}")
+        print(f"Live env obs range: [{live_obs.min():.3f}, {live_obs.max():.3f}]")
+
+        # Visualize live observations
+        fig, axes = plt.subplots(1, min(4, live_obs.shape[0]), figsize=(12, 3))
+        if len(axes.shape) == 0:  # Single subplot case
+            axes = [axes]
+
+        for i in range(min(4, live_obs.shape[0])):
+            obs = live_obs[i]
+            # obs should already be numpy from vec_env
+            if hasattr(obs, 'numpy'):
+                obs = obs.numpy()
+
+            if len(obs.shape) == 3 and obs.shape[0] <= 3:  # CHW format
+                obs_vis = obs.transpose(1, 2, 0)
+            else:  # HWC format
+                obs_vis = obs
+
+            axes[i].imshow(obs_vis.clip(0, 1))
+            axes[i].set_title(f"Live Env {i}")
+            axes[i].axis('off')
+
+        plt.suptitle("Live Environment Observations")
+        plt.tight_layout()
+        plt.savefig('debug_live_env.png')
+        plt.close()
 
         for eval_policy in args.eval_policies:
             target_state_ids = [[] for _ in range(args.eval_unroll_steps)]

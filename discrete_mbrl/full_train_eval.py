@@ -84,7 +84,7 @@ def main():
         f"Stage 2 (Stochastic): {type(stage2_obs)} - {stage2_obs['image'].shape if isinstance(stage2_obs, dict) else 'N/A'}")
 
     # Stage 3: Add RGB conversion
-    stage3_env = RGBImgPartialObsWrapper(stage2_env, tile_size=8)
+    stage3_env = MinigridRGBImgObsWrapper(stage2_env, tile_size=8)  # Changed this line!
     stage3_obs = stage3_env.reset()
     if isinstance(stage3_obs, tuple):
         stage3_obs = stage3_obs[0]
@@ -173,7 +173,7 @@ def main():
     plt.axis('off')
 
     plt.tight_layout()
-    plt.savefig('debug_env_pipeline_fixed.png', dpi=150, bbox_inches='tight')
+    plt.savefig('debug_img.png', dpi=150, bbox_inches='tight')
     plt.show()
 
     # Test action consistency

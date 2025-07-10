@@ -868,7 +868,7 @@ ENV_ALIASES = {
     'minigrid': 'MiniGrid-MultiRoom-N2-S4-v0',
     'minigrid-2-rooms': 'MiniGrid-MultiRoom-N2-S4-v0',
     'minigrid-4-rooms': 'MiniGrid-MultiRoom-N4-S5-v0',
-    'minigrid-empty': 'MiniGrid-Empty-6x6-v0',
+    #'minigrid-empty': 'MiniGrid-Empty-6x6-v0',
     'breakout': 'BreakoutNoFrameskip-v4',
     'crazyclimber': 'CrazyClimberNoFrameskip-v4',
     'mspacman': 'MsPacmanNoFrameskip-v4'
@@ -913,9 +913,6 @@ def check_env_name(env_name):
     return ENV_ALIASES.get(env_name, env_name)
 
 
-# Fixed section of env_helpers.py - around line 1000
-
-# Fixed section of env_helpers.py - around line 1000
 
 def make_env(env_name, replay_buffer=None, buffer_lock=None, extra_info=None,
              monitor=False, max_steps=None):
