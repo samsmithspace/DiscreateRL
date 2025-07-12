@@ -463,12 +463,18 @@ def load_and_prepare_models(args, test_sampler):
     if hasattr(encoder_model, 'enable_sparsity'):
         encoder_model.enable_sparsity()
 
+    # Create environment to get action space for transition model
+    env = make_env(args.env_name, max_steps=args.env_max_steps)
+
     # Load transition model
     trans_model = construct_trans_model(encoder_model, args, env.action_space)[0]
     trans_model = trans_model.to(args.device)
     freeze_model(trans_model)
     trans_model.eval()
     print(f'Loaded transition model')
+
+    # Close the temporary environment
+    env.close()
 
     # Handle universal_vq compatibility
     _handle_universal_vq_compatibility(args, encoder_model)

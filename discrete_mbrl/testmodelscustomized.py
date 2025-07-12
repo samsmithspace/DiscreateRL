@@ -1,626 +1,439 @@
 #!/usr/bin/env python3
 """
-Enhanced MiniGrid visualizer that properly handles symbolic observations
-and creates meaningful visualizations from discrete state representations.
+Simplified MiniGrid Model GUI Test - bypasses complex argument processing
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.gridspec import GridSpec
-import argparse
-import os
 import sys
-from typing import Tuple, Dict, Any, Optional, List
-import gymnasium as gym
-from tqdm import tqdm
+import os
+import argparse
+from argparse import Namespace
+import numpy as np
+import torch
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
+
+# Add the parent directory to path to import discrete_mbrl modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from env_helpers import make_env, check_env_name
+from model_construction import construct_ae_model, construct_trans_model
 
 
-# Import the fixed model loader
-class FixedModelLoader:
-    """Improved model loader that handles various tensor types correctly"""
+def create_simple_args(env_name, ae_model_type, latent_dim, device='cpu', **kwargs):
+    """Create a simple args object without complex processing."""
+    args = Namespace()
 
-    @staticmethod
-    def load_model_from_checkpoint(checkpoint_path: str, device: str = 'cpu') -> torch.nn.Module:
-        """Load a model from checkpoint, handling different save formats"""
+    # Basic settings
+    args.env_name = check_env_name(env_name)
+    args.ae_model_type = ae_model_type
+    args.trans_model_type = kwargs.get('trans_model_type', 'continuous')
+    args.device = device
+    args.load = True
 
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Model file not found: {checkpoint_path}")
+    # Model architecture - USE EXACT SAME DEFAULTS AS TRAINING
+    args.latent_dim = latent_dim
+    args.embedding_dim = kwargs.get('embedding_dim', 64)  # Default from training_helpers.py
+    args.filter_size = kwargs.get('filter_size', 8)  # Default from training_helpers.py
+    args.codebook_size = kwargs.get('codebook_size', 16)  # Default from training_helpers.py
+    args.ae_model_version = kwargs.get('ae_model_version', '2')  # Default from training_helpers.py
+    args.trans_model_version = kwargs.get('trans_model_version', '1')  # Default from training_helpers.py
+    args.trans_hidden = kwargs.get('trans_hidden', 256)  # Default from training_helpers.py
+    args.trans_depth = kwargs.get('trans_depth', 3)  # Default from training_helpers.py
+    args.stochastic = kwargs.get('stochastic', 'simple')  # Default from training_helpers.py
 
-        print(f"Loading model from: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Hash-relevant parameters that must match training
+    args.extra_info = kwargs.get('extra_info', None)  # Important for hash
+    args.repr_sparsity = kwargs.get('repr_sparsity', 0)  # Important for hash
+    args.sparsity_type = kwargs.get('sparsity_type', 'random')  # Important for hash
+    args.vq_trans_1d_conv = kwargs.get('vq_trans_1d_conv', False)  # Important for hash
 
-        # Case 1: Full model was saved
-        if isinstance(checkpoint, torch.nn.Module):
-            print("✓ Loaded full model object")
-            return checkpoint.to(device)
+    # Disable logging
+    args.wandb = False
+    args.comet_ml = False
 
-        # Case 2: Dictionary with state dict
-        if isinstance(checkpoint, dict):
-            state_dict = None
+    return args
 
-            # Try different keys for state dict
-            for key in ['state_dict', 'model_state_dict', 'model', 'encoder_state_dict', 'model_weights']:
-                if key in checkpoint:
-                    state_dict = checkpoint[key]
-                    print(f"Found state dict under key: '{key}'")
-                    break
 
-            if state_dict is None:
-                if FixedModelLoader._looks_like_state_dict(checkpoint):
-                    state_dict = checkpoint
-                    print("Using entire checkpoint as state dict")
-                else:
-                    raise ValueError("Could not find state dict in checkpoint")
+class SimpleModelGUI:
+    def __init__(self, env_name, ae_model_type, latent_dim, device='cpu', **kwargs):
+        print(f"Initializing GUI with: {env_name}, {ae_model_type}, latent_dim={latent_dim}")
 
-            return FixedModelLoader._create_safe_model(state_dict, device)
+        self.args = create_simple_args(env_name, ae_model_type, latent_dim, device, **kwargs)
 
-        raise ValueError(f"Cannot determine how to load model from {checkpoint_path}")
+        # Debug: Print all parameters that affect model hash
+        print("\n=== Model Parameters (for hash generation) ===")
+        print(f"env_name: {self.args.env_name}")
+        print(f"ae_model_type: {self.args.ae_model_type}")
+        print(f"trans_model_type: {self.args.trans_model_type}")
+        print(f"latent_dim: {self.args.latent_dim}")
+        print(f"embedding_dim: {self.args.embedding_dim}")
+        print(f"filter_size: {self.args.filter_size}")
+        print(f"codebook_size: {self.args.codebook_size}")
+        print(f"ae_model_version: {self.args.ae_model_version}")
+        print(f"trans_model_version: {self.args.trans_model_version}")
+        print(f"trans_hidden: {self.args.trans_hidden}")
+        print(f"trans_depth: {self.args.trans_depth}")
+        print(f"stochastic: {self.args.stochastic}")
+        print(f"extra_info: {self.args.extra_info}")
+        print(f"repr_sparsity: {self.args.repr_sparsity}")
+        print(f"sparsity_type: {self.args.sparsity_type}")
+        print(f"vq_trans_1d_conv: {self.args.vq_trans_1d_conv}")
+        print("=" * 50)
 
-    @staticmethod
-    def _looks_like_state_dict(checkpoint):
-        """Check if a dictionary looks like a state dict"""
-        if not isinstance(checkpoint, dict):
-            return False
+        self.setup_models()
+        self.setup_environments()
+        self.setup_gui()
 
-        tensor_count = sum(1 for v in checkpoint.values() if isinstance(v, torch.Tensor))
-        total_count = len(checkpoint)
-        return tensor_count / total_count > 0.8 if total_count > 0 else False
+        # State tracking
+        self.real_obs = None
+        self.model_obs = None
+        self.model_state = None
+        self.step_count = 0
 
-    @staticmethod
-    def _create_safe_model(state_dict: Dict[str, torch.Tensor], device: str) -> torch.nn.Module:
-        """Create a model that safely handles all tensor types"""
+        # Initialize environments
+        self.reset_environments()
 
-        class SafeModel(nn.Module):
-            def __init__(self, state_dict):
-                super().__init__()
+    def setup_models(self):
+        """Load the trained encoder and transition models."""
+        print("\n=== Loading Models ===")
 
-                # Infer properties
-                self.latent_dim = 64
-                self.n_embeddings = 512
-                self.n_latent_embeds = 64
-
-                # Process parameters safely
-                self.param_dict = nn.ParameterDict()
-                self.buffer_dict = {}
-
-                for name, tensor in state_dict.items():
-                    safe_name = name.replace('.', '_').replace('/', '_')
-
-                    try:
-                        if tensor.dtype.is_floating_point or tensor.dtype.is_complex:
-                            if hasattr(tensor, 'requires_grad') and tensor.requires_grad:
-                                self.param_dict[safe_name] = nn.Parameter(tensor.clone())
-                            else:
-                                self.register_buffer(f'buffer_{safe_name}', tensor.clone())
-                        else:
-                            self.register_buffer(f'buffer_{safe_name}', tensor.clone())
-                    except Exception as e:
-                        print(f"Warning: Could not process parameter {name}: {e}")
-
-                # Detect model type
-                keys = list(state_dict.keys())
-                key_str = ' '.join(keys).lower()
-                self.is_vqvae = any(indicator in key_str for indicator in ['quantize', 'embedding', 'codebook', 'vq'])
-
-            def encode(self, x):
-                """Encoding method"""
-                batch_size = x.size(0)
-                if self.is_vqvae:
-                    return torch.randint(0, self.n_embeddings, (batch_size, self.n_latent_embeds), device=x.device)
-                else:
-                    return x.view(batch_size, -1)
-
-            def decode(self, z):
-                """Decoding method"""
-                return z.float() if z.dtype == torch.long else z
-
-            def forward(self, x, action=None, return_logits=False):
-                """Forward pass"""
-                if action is not None:
-                    # Transition model
-                    batch_size = x.size(0)
-                    device = x.device
-
-                    if x.dtype == torch.long:
-                        next_state = x.clone()
-                        mask = torch.rand_like(x.float()) < 0.1
-                        random_indices = torch.randint_like(x, 0, self.n_embeddings)
-                        next_state = torch.where(mask, random_indices, next_state)
-                    else:
-                        noise = torch.randn_like(x) * 0.1
-                        next_state = x + noise
-
-                    reward = torch.zeros(batch_size, 1, device=device)
-                    gamma = torch.ones(batch_size, 1, device=device) * 0.99
-
-                    return next_state, reward, gamma
-                else:
-                    # Autoencoder
-                    encoded = self.encode(x)
-                    return self.decode(encoded)
-
-            def logits_to_state(self, logits):
-                """Convert logits to state"""
-                return torch.argmax(logits, dim=-1) if logits.dtype.is_floating_point else logits
-
-        model = SafeModel(state_dict)
         try:
-            model.load_state_dict(state_dict, strict=False)
-        except:
-            pass
-        return model.to(device)
+            # Create a dummy observation to get the shape
+            temp_env = make_env(self.args.env_name)
+            temp_obs = temp_env.reset()
+            if isinstance(temp_obs, tuple):
+                temp_obs = temp_obs[0]
+            temp_env.close()
 
+            print(f"Observation shape: {temp_obs.shape}")
 
-class MiniGridSymbolicVisualizer:
-    """Enhanced visualizer for MiniGrid symbolic observations"""
+            # Load encoder model with hash debugging
+            print(f"\n--- Loading Encoder ---")
+            print(f"Model type: {self.args.ae_model_type}, latent_dim={self.args.latent_dim}")
 
-    def __init__(self, env_name: str):
-        self.env_name = env_name
+            # Import the hash function to debug
+            from model_construction import make_model_hash, AE_MODEL_VARS, MODEL_VARS
 
-        # MiniGrid object types and colors
-        self.object_colors = {
-            0: (0, 0, 0),  # Empty/Unseen - Black
-            1: (128, 128, 128),  # Wall - Gray
-            2: (255, 255, 255),  # Floor - White
-            3: (255, 0, 0),  # Door - Red
-            4: (255, 255, 0),  # Key - Yellow
-            5: (128, 0, 128),  # Ball - Purple
-            6: (0, 0, 255),  # Box - Blue
-            7: (0, 255, 0),  # Goal - Green
-            8: (255, 165, 0),  # Lava - Orange
-            9: (255, 0, 255),  # Agent - Magenta
-        }
+            # Generate and display encoder hash
+            encoder_hash = make_model_hash(self.args, model_vars=AE_MODEL_VARS, exp_type='encoder')
+            print(f"Encoder hash: {encoder_hash}")
 
-        # Action names
-        self.action_names = {
-            0: "Turn Left",
-            1: "Turn Right",
-            2: "Move Forward",
-            3: "Pick Up",
-            4: "Drop",
-            5: "Toggle",
-            6: "Done"
-        }
+            # Check if encoder file exists
+            encoder_path = f'./models/{self.args.env_name}/model_{encoder_hash}.pt'
+            encoder_path = encoder_path.replace(':', '-')
+            print(f"Looking for encoder at: {encoder_path}")
+            print(f"Encoder file exists: {os.path.exists(encoder_path)}")
 
-    def get_true_grid_from_env(self, env):
-        """Get the actual grid representation from the environment"""
-        try:
-            # Try to get the grid from the environment's unwrapped version
-            unwrapped_env = env.unwrapped
-            if hasattr(unwrapped_env, 'grid'):
-                grid = unwrapped_env.grid
-                width, height = grid.width, grid.height
+            self.encoder_model = construct_ae_model(temp_obs.shape, self.args)[0]
+            self.encoder_model = self.encoder_model.to(self.args.device)
+            self.encoder_model.eval()
 
-                # Create visual grid
-                visual_grid = np.zeros((height, width), dtype=int)
+            # Load transition model with hash debugging
+            print(f"\n--- Loading Transition Model ---")
+            temp_env = make_env(self.args.env_name)
 
-                for i in range(width):
-                    for j in range(height):
-                        cell = grid.get(i, j)
-                        if cell is None:
-                            visual_grid[j, i] = 2  # Floor
-                        elif cell.type == 'wall':
-                            visual_grid[j, i] = 1  # Wall
-                        elif cell.type == 'goal':
-                            visual_grid[j, i] = 7  # Goal
-                        elif cell.type == 'door':
-                            visual_grid[j, i] = 3  # Door
-                        elif cell.type == 'key':
-                            visual_grid[j, i] = 4  # Key
-                        elif cell.type == 'ball':
-                            visual_grid[j, i] = 5  # Ball
-                        elif cell.type == 'box':
-                            visual_grid[j, i] = 6  # Box
-                        elif cell.type == 'lava':
-                            visual_grid[j, i] = 8  # Lava
-                        else:
-                            visual_grid[j, i] = 2  # Default to floor
+            # Generate and display transition hash
+            trans_hash = make_model_hash(self.args, model_vars=MODEL_VARS, exp_type='trans_model')
+            print(f"Transition hash: {trans_hash}")
 
-                # Add agent position
-                if hasattr(unwrapped_env, 'agent_pos'):
-                    agent_x, agent_y = unwrapped_env.agent_pos
-                    visual_grid[agent_y, agent_x] = 9  # Agent
+            # Check if transition file exists
+            trans_path = f'./models/{self.args.env_name}/model_{trans_hash}.pt'
+            trans_path = trans_path.replace(':', '-')
+            print(f"Looking for transition model at: {trans_path}")
+            print(f"Transition file exists: {os.path.exists(trans_path)}")
 
-                return visual_grid
+            self.trans_model = construct_trans_model(
+                self.encoder_model, self.args, temp_env.action_space)[0]
+            self.trans_model = self.trans_model.to(self.args.device)
+            self.trans_model.eval()
+            temp_env.close()
+
+            # List available model files for comparison
+            models_dir = f'./models/{self.args.env_name}'
+            models_dir = models_dir.replace(':', '-')
+            if os.path.exists(models_dir):
+                print(f"\n--- Available model files in {models_dir} ---")
+                model_files = [f for f in os.listdir(models_dir) if f.endswith('.pt')]
+                for f in model_files:
+                    print(f"  {f}")
+                if not model_files:
+                    print("  No .pt model files found!")
+            else:
+                print(f"\n--- Models directory does not exist: {models_dir} ---")
+
+            print("✓ Model loading completed!")
 
         except Exception as e:
-            print(f"Could not extract grid from environment: {e}")
+            print(f"✗ Error loading models: {e}")
+            print("Make sure you have trained models with the same parameters!")
+            import traceback
+            traceback.print_exc()
+            raise
 
-        return None
+    def setup_environments(self):
+        """Setup real environment."""
+        self.real_env = make_env(self.args.env_name)
+        print(f"✓ Environment created: {self.args.env_name}")
 
-    def observation_to_grid(self, obs: np.ndarray, grid_size: tuple = None) -> np.ndarray:
-        """Convert any observation format to a grid representation"""
+    def setup_gui(self):
+        """Create the GUI interface."""
+        self.root = tk.Tk()
+        self.root.title(f"MiniGrid: Real vs Model ({self.args.env_name})")
+        self.root.geometry("700x500")
 
-        if obs is None:
-            return np.zeros((7, 7), dtype=int)
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill='both', expand=True)
 
-        print(f"DEBUG: Converting observation shape {obs.shape}, dtype {obs.dtype}")
-        print(f"DEBUG: Obs min/max: {obs.min()}, {obs.max()}")
+        # Title
+        title = ttk.Label(main_frame, text="MiniGrid: Real vs Model Prediction",
+                          font=("Arial", 14, "bold"))
+        title.pack(pady=(0, 10))
+
+        # Images frame
+        images_frame = ttk.Frame(main_frame)
+        images_frame.pack(pady=10)
+
+        # Real environment
+        real_frame = ttk.LabelFrame(images_frame, text="Real Environment", padding="5")
+        real_frame.pack(side='left', padx=(0, 10))
+
+        self.real_canvas = tk.Canvas(real_frame, width=200, height=200, bg="white")
+        self.real_canvas.pack()
+
+        # Model prediction
+        model_frame = ttk.LabelFrame(images_frame, text="Model Prediction", padding="5")
+        model_frame.pack(side='right', padx=(10, 0))
+
+        self.model_canvas = tk.Canvas(model_frame, width=200, height=200, bg="white")
+        self.model_canvas.pack()
+
+        # Info frame
+        info_frame = ttk.Frame(main_frame)
+        info_frame.pack(pady=10)
+
+        self.step_label = ttk.Label(info_frame, text="Steps: 0", font=("Arial", 12))
+        self.step_label.pack()
+
+        # Controls frame
+        controls_frame = ttk.LabelFrame(main_frame, text="Controls", padding="10")
+        controls_frame.pack(pady=10, fill='x')
+
+        controls_text = (
+            "Arrow Keys: ↑=Forward, ←=Turn Left, →=Turn Right, ↓=Stay\n"
+            "R: Reset  |  Q: Quit"
+        )
+        ttk.Label(controls_frame, text=controls_text, justify='center').pack()
+
+        # Action mapping for MiniGrid
+        self.action_map = {
+            'Up': 2,  # Move forward
+            'Left': 0,  # Turn left
+            'Right': 1,  # Turn right
+            'Down': 6  # Done/Stay
+        }
+
+        # Bind keyboard events
+        self.root.bind('<KeyPress>', self.on_key_press)
+        self.root.focus_set()
+
+    def preprocess_obs(self, obs):
+        """Preprocess observation for model input."""
+        if isinstance(obs, np.ndarray):
+            obs = torch.from_numpy(obs).float()
+        if len(obs.shape) == 3:
+            obs = obs.unsqueeze(0)  # Add batch dimension
+        return obs
+
+    def obs_to_display_image(self, obs, size=(200, 200)):
+        """Convert observation to displayable PIL Image."""
+        if isinstance(obs, torch.Tensor):
+            obs = obs.cpu().numpy()
 
         # Handle different observation formats
-        if len(obs.shape) == 1:
-            # Flattened observation - try to reshape
-            obs_len = len(obs)
+        if len(obs.shape) == 4:  # Batch dimension
+            obs = obs[0]
+        if len(obs.shape) == 3 and obs.shape[0] <= 3:  # CHW format
+            obs = obs.transpose(1, 2, 0)  # Convert to HWC
 
-            # Common MiniGrid sizes
-            possible_sizes = [(5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (10, 10)]
+        # Ensure values are in [0, 1] range
+        if obs.max() > 1.0:
+            obs = obs / 255.0
+        obs = np.clip(obs, 0, 1)
 
-            for h, w in possible_sizes:
-                if h * w == obs_len:
-                    grid = obs.reshape(h, w)
-                    print(f"DEBUG: Reshaped to {h}x{w} grid")
-                    return self._normalize_grid_values(grid)
-                elif h * w * 3 == obs_len:  # Might be with channels
-                    grid = obs.reshape(h, w, 3)[:, :, 0]  # Take first channel
-                    print(f"DEBUG: Reshaped to {h}x{w}x3, took first channel")
-                    return self._normalize_grid_values(grid)
+        # Convert to PIL Image
+        if len(obs.shape) == 2:  # Grayscale
+            obs = np.stack([obs] * 3, axis=-1)  # Convert to RGB
 
-            # If no standard size works, create a representation
-            side_len = int(np.sqrt(obs_len))
-            if side_len * side_len == obs_len:
-                grid = obs.reshape(side_len, side_len)
-                return self._normalize_grid_values(grid)
-            else:
-                # Create a horizontal strip
-                grid = obs.reshape(1, -1)
-                return self._normalize_grid_values(grid)
+        img = Image.fromarray((obs * 255).astype(np.uint8))
+        img = img.resize(size, Image.NEAREST)  # Use nearest neighbor for pixel art
+        return img
 
-        elif len(obs.shape) == 2:
-            # Already 2D grid
-            return self._normalize_grid_values(obs)
-
-        elif len(obs.shape) == 3:
-            if obs.shape[2] <= 3:
-                # Take first channel
-                grid = obs[:, :, 0]
-                return self._normalize_grid_values(grid)
-            elif obs.shape[0] <= 3:
-                # Channels first, take first channel
-                grid = obs[0, :, :]
-                return self._normalize_grid_values(grid)
-            else:
-                # Unknown format, take a slice
-                grid = obs[:, :, 0] if obs.shape[2] < obs.shape[0] else obs[0, :, :]
-                return self._normalize_grid_values(grid)
-
+    def reset_environments(self):
+        """Reset both real and model environments."""
+        # Reset real environment
+        reset_result = self.real_env.reset()
+        if isinstance(reset_result, tuple):
+            self.real_obs, _ = reset_result
         else:
-            # Higher dimensional, flatten and try again
-            return self.observation_to_grid(obs.reshape(-1))
+            self.real_obs = reset_result
 
-    def _normalize_grid_values(self, grid: np.ndarray) -> np.ndarray:
-        """Normalize grid values to reasonable object type range"""
-        grid = grid.astype(int)
+        # Reset model state to match real environment
+        self.sync_model_with_real()
 
-        # If values are too large, take modulo
-        unique_vals = np.unique(grid)
-        print(f"DEBUG: Grid unique values: {unique_vals}")
+        self.step_count = 0
+        self.update_display()
+        print("Environments reset!")
 
-        if np.max(unique_vals) > 10:
-            grid = grid % 10
-            print(f"DEBUG: Normalized large values with modulo")
+    def sync_model_with_real(self):
+        """Sync model state with real environment state."""
+        with torch.no_grad():
+            obs_tensor = self.preprocess_obs(self.real_obs).to(self.args.device)
 
-        return grid
+            # Encode real observation to get model state
+            self.model_state = self.encoder_model.encode(obs_tensor)
+            if self.args.trans_model_type == 'continuous':
+                self.model_state = self.model_state.reshape(self.model_state.shape[0], -1)
 
-    def grid_to_image(self, grid: np.ndarray, scale: int = 30) -> np.ndarray:
-        """Convert grid to colored image"""
-        if grid is None or grid.size == 0:
-            return np.zeros((210, 210, 3), dtype=np.uint8)
+            # Decode to get model observation
+            model_obs_tensor = self.encoder_model.decode(self.model_state)
+            self.model_obs = model_obs_tensor.cpu().numpy()[0]
 
-        h, w = grid.shape
-        image = np.zeros((h * scale, w * scale, 3), dtype=np.uint8)
+    def step_real_environment(self, action):
+        """Take a step in the real environment."""
+        step_result = self.real_env.step(action)
 
-        for i in range(h):
-            for j in range(w):
-                cell_value = int(grid[i, j]) % len(self.object_colors)
-                color = self.object_colors[cell_value]
-
-                y_start, y_end = i * scale, (i + 1) * scale
-                x_start, x_end = j * scale, (j + 1) * scale
-
-                image[y_start:y_end, x_start:x_end] = color
-
-                # Add border
-                if scale > 10:
-                    image[y_start:y_start + 2, x_start:x_end] = (64, 64, 64)  # Top border
-                    image[y_end - 2:y_end, x_start:x_end] = (64, 64, 64)  # Bottom border
-                    image[y_start:y_end, x_start:x_start + 2] = (64, 64, 64)  # Left border
-                    image[y_start:y_end, x_end - 2:x_end] = (64, 64, 64)  # Right border
-
-        return image
-
-    def create_detailed_comparison(self, real_trajectory: List[np.ndarray],
-                                   pred_trajectory: List[np.ndarray],
-                                   actions: List[int],
-                                   true_grids: List[np.ndarray] = None,
-                                   save_path: str = None) -> plt.Figure:
-        """Create detailed comparison with multiple visualization methods"""
-
-        n_steps = min(len(real_trajectory), len(pred_trajectory))
-
-        # Create figure with multiple rows
-        fig = plt.figure(figsize=(4 * n_steps, 12))
-
-        if true_grids:
-            gs = GridSpec(4, n_steps, figure=fig, height_ratios=[1, 1, 1, 0.3])
+        if len(step_result) == 4:
+            self.real_obs, reward, done, info = step_result
         else:
-            gs = GridSpec(3, n_steps, figure=fig, height_ratios=[1, 1, 0.3])
+            self.real_obs, reward, terminated, truncated, info = step_result
+            done = terminated or truncated
 
-        for step in range(n_steps):
-            col = step
+        return reward, done, info
 
-            # True environment grid (if available)
-            if true_grids and step < len(true_grids):
-                ax_true = fig.add_subplot(gs[0, col])
-                true_img = self.grid_to_image(true_grids[step])
-                ax_true.imshow(true_img)
-                ax_true.set_title(f'True Grid {step}', fontsize=10)
-                ax_true.axis('off')
+    def step_model_prediction(self, action):
+        """Get model's prediction for the next state."""
+        if self.model_state is None:
+            return
 
-            # Real observation interpretation
-            row_offset = 1 if true_grids else 0
-            ax_real = fig.add_subplot(gs[row_offset, col])
+        with torch.no_grad():
+            action_tensor = torch.tensor([action], dtype=torch.long).to(self.args.device)
 
-            if step < len(real_trajectory):
-                real_grid = self.observation_to_grid(real_trajectory[step])
-                real_img = self.grid_to_image(real_grid)
-                ax_real.imshow(real_img)
-                ax_real.set_title(f'Real Obs {step}', fontsize=10)
-            else:
-                ax_real.text(0.5, 0.5, 'No Data', ha='center', va='center')
-                ax_real.set_title(f'Real Obs {step}', fontsize=10)
-            ax_real.axis('off')
+            # Predict next state using transition model
+            next_state_pred = self.trans_model(self.model_state, action_tensor)[0]
 
-            # Predicted observation
-            ax_pred = fig.add_subplot(gs[row_offset + 1, col])
+            # Decode predicted state to observation
+            next_obs_pred = self.encoder_model.decode(next_state_pred)
 
-            if step < len(pred_trajectory):
-                pred_grid = self.observation_to_grid(pred_trajectory[step])
-                pred_img = self.grid_to_image(pred_grid)
-                ax_pred.imshow(pred_img)
-                ax_pred.set_title(f'Pred Obs {step}', fontsize=10)
-            else:
-                ax_pred.text(0.5, 0.5, 'No Pred', ha='center', va='center')
-                ax_pred.set_title(f'Pred Obs {step}', fontsize=10)
-            ax_pred.axis('off')
+            # Update model state and observation
+            self.model_state = next_state_pred
+            self.model_obs = next_obs_pred.cpu().numpy()[0]
 
-            # Action
-            if step < len(actions):
-                ax_action = fig.add_subplot(gs[-1, col])
-                action_name = self.action_names.get(actions[step], f"Act {actions[step]}")
-                ax_action.text(0.5, 0.5, action_name, ha='center', va='center',
-                               fontsize=8, rotation=45)
-                ax_action.axis('off')
-
-        plt.suptitle(f'MiniGrid Detailed Comparison - {self.env_name}', fontsize=14)
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved detailed visualization to {save_path}")
-
-        return fig
-
-
-def enhanced_rollout_with_true_states(encoder_model, trans_model, env_name: str,
-                                      device: str, n_steps: int = 10) -> Dict[str, Any]:
-    """Enhanced rollout that captures both observations and true environment states"""
-
-    print(f"\n=== Enhanced Rollout Evaluation on {env_name} ===")
-
-    # Create visualizer
-    visualizer = MiniGridSymbolicVisualizer(env_name)
-
-    # Create environment
-    env = gym.make(env_name)
-
-    results = {
-        'real_trajectory': [],
-        'pred_trajectory': [],
-        'true_grids': [],
-        'actions': [],
-        'rewards': [],
-        'pred_rewards': [],
-        'obs_shapes': [],
-        'pred_shapes': []
-    }
-
-    # Reset environment
-    obs, info = env.reset() if hasattr(env.reset(), '__len__') and len(env.reset()) == 2 else (env.reset(), {})
-
-    print(f"Initial observation: shape={obs.shape}, dtype={obs.dtype}")
-    print(f"Initial obs unique values: {np.unique(obs)}")
-
-    results['real_trajectory'].append(obs.copy())
-    results['obs_shapes'].append(obs.shape)
-
-    # Get true grid state
-    true_grid = visualizer.get_true_grid_from_env(env)
-    if true_grid is not None:
-        results['true_grids'].append(true_grid.copy())
-        print(f"True grid shape: {true_grid.shape}")
-        print(f"True grid unique values: {np.unique(true_grid)}")
-
-    # Encode initial state
-    try:
-        obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
-        current_state = encoder_model.encode(obs_tensor)
-        print(f"Encoded state shape: {current_state.shape}, dtype: {current_state.dtype}")
-    except Exception as e:
-        print(f"Error encoding initial observation: {e}")
-        return results
-
-    # Run rollout
-    for step in range(n_steps):
-        print(f"\n--- Step {step + 1}/{n_steps} ---")
-
-        # Sample action
-        action = env.action_space.sample()
-        results['actions'].append(action)
-
-        action_name = visualizer.action_names.get(action, f"Action {action}")
-        print(f"Taking action: {action} ({action_name})")
-
-        # Predict next state
+    def update_display(self):
+        """Update the GUI display with current observations."""
         try:
-            action_tensor = torch.LongTensor([action]).to(device)
-            pred_next_state, pred_reward, pred_gamma = trans_model(current_state, action_tensor)
+            # Update real environment image
+            if self.real_obs is not None:
+                real_img = self.obs_to_display_image(self.real_obs)
+                self.real_photo = ImageTk.PhotoImage(real_img)
+                self.real_canvas.delete("all")
+                self.real_canvas.create_image(100, 100, image=self.real_photo)
 
-            # Decode predicted state
-            pred_obs = encoder_model.decode(pred_next_state)
+            # Update model prediction image
+            if self.model_obs is not None:
+                model_img = self.obs_to_display_image(self.model_obs)
+                self.model_photo = ImageTk.PhotoImage(model_img)
+                self.model_canvas.delete("all")
+                self.model_canvas.create_image(100, 100, image=self.model_photo)
 
-            if isinstance(pred_obs, torch.Tensor):
-                pred_obs_np = pred_obs.detach().cpu().numpy().squeeze()
-            else:
-                pred_obs_np = pred_obs
-
-            results['pred_trajectory'].append(pred_obs_np)
-            results['pred_shapes'].append(pred_obs_np.shape)
-            results['pred_rewards'].append(pred_reward.item())
-
-            print(f"Predicted obs shape: {pred_obs_np.shape}")
-            print(f"Predicted reward: {pred_reward.item():.3f}")
-
-            # Update current state
-            current_state = pred_next_state
+            # Update step counter
+            self.step_label.config(text=f"Steps: {self.step_count}")
 
         except Exception as e:
-            print(f"Error in prediction: {e}")
-            # Add dummy prediction
-            results['pred_trajectory'].append(np.zeros_like(obs))
-            results['pred_rewards'].append(0.0)
+            print(f"Error updating display: {e}")
 
-        # Take actual step
-        step_result = env.step(action)
-        if len(step_result) == 5:
-            next_obs, reward, terminated, truncated, info = step_result
-            done = terminated or truncated
-        else:
-            next_obs, reward, done, info = step_result
+    def on_key_press(self, event):
+        """Handle keyboard input."""
+        key = event.keysym
 
-        results['real_trajectory'].append(next_obs.copy())
-        results['obs_shapes'].append(next_obs.shape)
-        results['rewards'].append(reward)
+        if key == 'q' or key == 'Q':
+            self.quit_app()
+        elif key == 'r' or key == 'R':
+            self.reset_environments()
+        elif key in self.action_map:
+            self.take_action(self.action_map[key])
 
-        # Get true grid after step
-        true_grid = visualizer.get_true_grid_from_env(env)
-        if true_grid is not None:
-            results['true_grids'].append(true_grid.copy())
+    def take_action(self, action):
+        """Execute an action in both environments."""
+        try:
+            # Step real environment
+            reward, done, info = self.step_real_environment(action)
 
-        print(f"Real reward: {reward:.3f}")
-        print(f"Real obs shape: {next_obs.shape}")
-        print(f"Episode done: {done}")
+            # Step model prediction
+            self.step_model_prediction(action)
 
-        if done:
-            print(f"Episode ended at step {step + 1}")
-            break
+            self.step_count += 1
+            print(f"Action {action}, Step {self.step_count}, Reward: {reward:.2f}")
 
-    env.close()
+            # Update display
+            self.update_display()
 
-    # Create enhanced visualization
-    print("\nCreating enhanced visualization...")
+            # Check if episode is done
+            if done:
+                print(f"Episode finished! Steps taken: {self.step_count}")
+                self.root.after(2000, self.reset_environments)
 
-    try:
-        fig = visualizer.create_detailed_comparison(
-            results['real_trajectory'],
-            results['pred_trajectory'],
-            results['actions'],
-            results['true_grids'] if results['true_grids'] else None,
-            save_path=f'enhanced_minigrid_{env_name.replace("/", "_").replace("-", "_")}.png'
-        )
+        except Exception as e:
+            print(f"Error taking action: {e}")
 
-        plt.show()
+    def quit_app(self):
+        """Clean up and quit the application."""
+        try:
+            self.real_env.close()
+        except:
+            pass
+        self.root.quit()
+        self.root.destroy()
 
-        # Create a simple grid comparison
-        print("Creating simple grid comparison...")
+    def run(self):
+        """Start the GUI application."""
+        print("🎮 Starting GUI...")
+        print("Use arrow keys to control the agent!")
+        print("Press 'R' to reset, 'Q' to quit")
 
-        fig2, axes = plt.subplots(2, min(5, len(results['real_trajectory'])), figsize=(15, 6))
-        if len(results['real_trajectory']) == 1:
-            axes = axes.reshape(2, 1)
-
-        for i in range(min(5, len(results['real_trajectory']))):
-            # Real observation as grid
-            real_grid = visualizer.observation_to_grid(results['real_trajectory'][i])
-            real_img = visualizer.grid_to_image(real_grid, scale=20)
-
-            axes[0, i].imshow(real_img)
-            axes[0, i].set_title(f'Real {i}')
-            axes[0, i].axis('off')
-
-            # Predicted observation as grid
-            if i < len(results['pred_trajectory']):
-                pred_grid = visualizer.observation_to_grid(results['pred_trajectory'][i])
-                pred_img = visualizer.grid_to_image(pred_grid, scale=20)
-                axes[1, i].imshow(pred_img)
-                axes[1, i].set_title(f'Pred {i}')
-            else:
-                axes[1, i].text(0.5, 0.5, 'No Pred', ha='center', va='center')
-                axes[1, i].set_title(f'Pred {i}')
-            axes[1, i].axis('off')
-
-        plt.suptitle('Simple Grid Comparison')
-        plt.tight_layout()
-        plt.savefig(f'simple_grid_{env_name.replace("/", "_").replace("-", "_")}.png')
-        plt.show()
-
-    except Exception as e:
-        print(f"Error creating visualization: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # Print summary
-    print(f"\n=== Summary ===")
-    print(f"Steps completed: {len(results['real_trajectory']) - 1}")
-    print(f"Observation shapes: {list(set(results['obs_shapes']))}")
-    if results['pred_shapes']:
-        print(f"Prediction shapes: {list(set(results['pred_shapes']))}")
-    if results['rewards']:
-        print(f"Average reward: {np.mean(results['rewards']):.3f}")
-
-    return results
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            print("\nQuitting...")
+        finally:
+            self.quit_app()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Enhanced MiniGrid Symbolic Evaluation")
-    parser.add_argument('--encoder_path', required=True, help='Path to encoder model')
-    parser.add_argument('--trans_path', required=True, help='Path to transition model')
-    parser.add_argument('--env_name', default='MiniGrid-Empty-6x6-v0', help='MiniGrid environment name')
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--n_steps', type=int, default=10, help='Number of rollout steps')
+    """Main function."""
+    parser = argparse.ArgumentParser(description="Simple MiniGrid Model GUI")
+    parser.add_argument('--env_name', type=str, default='MiniGrid-Empty-6x6-v0')
+    parser.add_argument('--ae_model_type', type=str, default='ae')
+    parser.add_argument('--latent_dim', type=int, default=32)
+    parser.add_argument('--device', type=str, default='cpu')
 
     args = parser.parse_args()
 
-    print("Enhanced MiniGrid Symbolic Evaluation")
-    print("=" * 60)
-
-    # Load models
-    loader = FixedModelLoader()
+    print(f"🚀 Launching GUI:")
+    print(f"  Environment: {args.env_name}")
+    print(f"  Model: {args.ae_model_type}")
+    print(f"  Latent Dim: {args.latent_dim}")
+    print(f"  Device: {args.device}")
 
     try:
-        encoder_model = loader.load_model_from_checkpoint(args.encoder_path, args.device)
-        trans_model = loader.load_model_from_checkpoint(args.trans_path, args.device)
-
-        print("✓ Both models loaded successfully")
-
-        encoder_model.eval()
-        trans_model.eval()
-
-        # Run enhanced evaluation
-        results = enhanced_rollout_with_true_states(
-            encoder_model, trans_model, args.env_name, args.device, args.n_steps
-        )
-
-        print("\n✓ Enhanced evaluation complete!")
-        print("Check the generated visualization files.")
-
+        app = SimpleModelGUI(args.env_name, args.ae_model_type, args.latent_dim, args.device)
+        app.run()
     except Exception as e:
-        print(f"Evaluation failed: {e}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
