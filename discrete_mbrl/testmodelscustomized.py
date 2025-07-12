@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simplified MiniGrid Model GUI Test - bypasses complex argument processing
+Debug version to find why model predictions are black
 """
 
 import sys
@@ -33,20 +33,39 @@ def create_simple_args(env_name, ae_model_type, latent_dim, device='cpu', **kwar
 
     # Model architecture - USE EXACT SAME DEFAULTS AS TRAINING
     args.latent_dim = latent_dim
-    args.embedding_dim = kwargs.get('embedding_dim', 64)  # Default from training_helpers.py
-    args.filter_size = kwargs.get('filter_size', 8)  # Default from training_helpers.py
-    args.codebook_size = kwargs.get('codebook_size', 16)  # Default from training_helpers.py
-    args.ae_model_version = kwargs.get('ae_model_version', '2')  # Default from training_helpers.py
-    args.trans_model_version = kwargs.get('trans_model_version', '1')  # Default from training_helpers.py
-    args.trans_hidden = kwargs.get('trans_hidden', 256)  # Default from training_helpers.py
-    args.trans_depth = kwargs.get('trans_depth', 3)  # Default from training_helpers.py
-    args.stochastic = kwargs.get('stochastic', 'simple')  # Default from training_helpers.py
+    args.embedding_dim = kwargs.get('embedding_dim', 64)
+    args.filter_size = kwargs.get('filter_size', 8)
+    args.codebook_size = kwargs.get('codebook_size', 16)
+    args.ae_model_version = kwargs.get('ae_model_version', '2')
+    args.trans_model_version = kwargs.get('trans_model_version', '1')
+    args.trans_hidden = kwargs.get('trans_hidden', 256)
+    args.trans_depth = kwargs.get('trans_depth', 3)
+    args.stochastic = kwargs.get('stochastic', 'simple')
 
     # Hash-relevant parameters that must match training
-    args.extra_info = kwargs.get('extra_info', None)  # Important for hash
-    args.repr_sparsity = kwargs.get('repr_sparsity', 0)  # Important for hash
-    args.sparsity_type = kwargs.get('sparsity_type', 'random')  # Important for hash
-    args.vq_trans_1d_conv = kwargs.get('vq_trans_1d_conv', False)  # Important for hash
+    args.extra_info = kwargs.get('extra_info', None)
+    args.repr_sparsity = kwargs.get('repr_sparsity', 0)
+    args.sparsity_type = kwargs.get('sparsity_type', 'random')
+    args.vq_trans_1d_conv = kwargs.get('vq_trans_1d_conv', False)
+
+    # FTA parameters
+    args.fta_tiles = kwargs.get('fta_tiles', 20)
+    args.fta_bound_low = kwargs.get('fta_bound_low', -2)
+    args.fta_bound_high = kwargs.get('fta_bound_high', 2)
+    args.fta_eta = kwargs.get('fta_eta', 0.2)
+
+    # Training parameters
+    args.learning_rate = kwargs.get('learning_rate', 3e-4)
+    args.trans_learning_rate = kwargs.get('trans_learning_rate', 3e-4)
+    args.ae_grad_clip = kwargs.get('ae_grad_clip', 0)
+    args.log_freq = kwargs.get('log_freq', 100)
+
+    # Additional parameters
+    args.vq_trans_loss_type = kwargs.get('vq_trans_loss_type', 'mse')
+    args.vq_trans_state_snap = kwargs.get('vq_trans_state_snap', False)
+    args.use_soft_embeds = kwargs.get('use_soft_embeds', False)
+    args.e2e_loss = kwargs.get('e2e_loss', False)
+    args.log_norms = kwargs.get('log_norms', False)
 
     # Disable logging
     args.wandb = False
@@ -55,32 +74,11 @@ def create_simple_args(env_name, ae_model_type, latent_dim, device='cpu', **kwar
     return args
 
 
-class SimpleModelGUI:
+class DebugModelGUI:
     def __init__(self, env_name, ae_model_type, latent_dim, device='cpu', **kwargs):
-        print(f"Initializing GUI with: {env_name}, {ae_model_type}, latent_dim={latent_dim}")
+        print(f"🔍 DEBUG: Initializing GUI with: {env_name}, {ae_model_type}, latent_dim={latent_dim}")
 
         self.args = create_simple_args(env_name, ae_model_type, latent_dim, device, **kwargs)
-
-        # Debug: Print all parameters that affect model hash
-        print("\n=== Model Parameters (for hash generation) ===")
-        print(f"env_name: {self.args.env_name}")
-        print(f"ae_model_type: {self.args.ae_model_type}")
-        print(f"trans_model_type: {self.args.trans_model_type}")
-        print(f"latent_dim: {self.args.latent_dim}")
-        print(f"embedding_dim: {self.args.embedding_dim}")
-        print(f"filter_size: {self.args.filter_size}")
-        print(f"codebook_size: {self.args.codebook_size}")
-        print(f"ae_model_version: {self.args.ae_model_version}")
-        print(f"trans_model_version: {self.args.trans_model_version}")
-        print(f"trans_hidden: {self.args.trans_hidden}")
-        print(f"trans_depth: {self.args.trans_depth}")
-        print(f"stochastic: {self.args.stochastic}")
-        print(f"extra_info: {self.args.extra_info}")
-        print(f"repr_sparsity: {self.args.repr_sparsity}")
-        print(f"sparsity_type: {self.args.sparsity_type}")
-        print(f"vq_trans_1d_conv: {self.args.vq_trans_1d_conv}")
-        print("=" * 50)
-
         self.setup_models()
         self.setup_environments()
         self.setup_gui()
@@ -94,9 +92,28 @@ class SimpleModelGUI:
         # Initialize environments
         self.reset_environments()
 
+    def debug_tensor(self, tensor, name):
+        """Debug utility to print tensor information."""
+        if isinstance(tensor, torch.Tensor):
+            tensor_np = tensor.detach().cpu().numpy()
+        else:
+            tensor_np = tensor
+
+        print(f"🔍 {name}:")
+        print(f"  Shape: {tensor_np.shape}")
+        print(f"  Dtype: {tensor_np.dtype}")
+        print(f"  Min: {tensor_np.min():.4f}")
+        print(f"  Max: {tensor_np.max():.4f}")
+        print(f"  Mean: {tensor_np.mean():.4f}")
+        print(f"  Has NaN: {np.isnan(tensor_np).any()}")
+        print(f"  Has Inf: {np.isinf(tensor_np).any()}")
+        if tensor_np.size < 20:  # Only print values for small tensors
+            print(f"  Values: {tensor_np.flatten()}")
+        print()
+
     def setup_models(self):
         """Load the trained encoder and transition models."""
-        print("\n=== Loading Models ===")
+        print("\n🔍 DEBUG: Setting up models...")
 
         try:
             # Create a dummy observation to get the shape
@@ -106,67 +123,67 @@ class SimpleModelGUI:
                 temp_obs = temp_obs[0]
             temp_env.close()
 
-            print(f"Observation shape: {temp_obs.shape}")
+            print(f"🔍 Original observation shape: {temp_obs.shape}")
+            self.debug_tensor(temp_obs, "Original observation")
 
-            # Load encoder model with hash debugging
-            print(f"\n--- Loading Encoder ---")
-            print(f"Model type: {self.args.ae_model_type}, latent_dim={self.args.latent_dim}")
-
-            # Import the hash function to debug
-            from model_construction import make_model_hash, AE_MODEL_VARS, MODEL_VARS
-
-            # Generate and display encoder hash
-            encoder_hash = make_model_hash(self.args, model_vars=AE_MODEL_VARS, exp_type='encoder')
-            print(f"Encoder hash: {encoder_hash}")
-
-            # Check if encoder file exists
-            encoder_path = f'./models/{self.args.env_name}/model_{encoder_hash}.pt'
-            encoder_path = encoder_path.replace(':', '-')
-            print(f"Looking for encoder at: {encoder_path}")
-            print(f"Encoder file exists: {os.path.exists(encoder_path)}")
-
+            # Load encoder model
             self.encoder_model = construct_ae_model(temp_obs.shape, self.args)[0]
             self.encoder_model = self.encoder_model.to(self.args.device)
             self.encoder_model.eval()
 
-            # Load transition model with hash debugging
-            print(f"\n--- Loading Transition Model ---")
+            # Test encoder with dummy observation
+            print("🔍 Testing encoder with dummy observation...")
+            with torch.no_grad():
+                dummy_obs = torch.from_numpy(temp_obs).float().unsqueeze(0).to(self.args.device)
+                self.debug_tensor(dummy_obs, "Encoder input")
+
+                encoded = self.encoder_model.encode(dummy_obs)
+                self.debug_tensor(encoded, "Encoded latent")
+
+                decoded = self.encoder_model.decode(encoded)
+                self.debug_tensor(decoded, "Decoded observation")
+
+            # Load transition model
             temp_env = make_env(self.args.env_name)
-
-            # Generate and display transition hash
-            trans_hash = make_model_hash(self.args, model_vars=MODEL_VARS, exp_type='trans_model')
-            print(f"Transition hash: {trans_hash}")
-
-            # Check if transition file exists
-            trans_path = f'./models/{self.args.env_name}/model_{trans_hash}.pt'
-            trans_path = trans_path.replace(':', '-')
-            print(f"Looking for transition model at: {trans_path}")
-            print(f"Transition file exists: {os.path.exists(trans_path)}")
-
             self.trans_model = construct_trans_model(
                 self.encoder_model, self.args, temp_env.action_space)[0]
             self.trans_model = self.trans_model.to(self.args.device)
             self.trans_model.eval()
             temp_env.close()
 
-            # List available model files for comparison
-            models_dir = f'./models/{self.args.env_name}'
-            models_dir = models_dir.replace(':', '-')
-            if os.path.exists(models_dir):
-                print(f"\n--- Available model files in {models_dir} ---")
-                model_files = [f for f in os.listdir(models_dir) if f.endswith('.pt')]
-                for f in model_files:
-                    print(f"  {f}")
-                if not model_files:
-                    print("  No .pt model files found!")
-            else:
-                print(f"\n--- Models directory does not exist: {models_dir} ---")
+            # Test transition model
+            print("🔍 Testing transition model...")
+            with torch.no_grad():
+                # Prepare latent state for transition model
+                if self.args.trans_model_type == 'continuous':
+                    if hasattr(self.encoder_model, 'latent_dim'):
+                        latent_for_trans = encoded.reshape(encoded.shape[0], self.encoder_model.latent_dim)
+                    else:
+                        latent_for_trans = encoded.reshape(encoded.shape[0], -1)
+                else:
+                    latent_for_trans = encoded
 
-            print("✓ Model loading completed!")
+                self.debug_tensor(latent_for_trans, "Latent for transition model")
+
+                # Test transition prediction
+                dummy_action = torch.tensor([0], dtype=torch.long).to(self.args.device)  # Forward action
+                trans_output = self.trans_model(latent_for_trans, dummy_action)
+
+                if isinstance(trans_output, tuple):
+                    next_latent = trans_output[0]
+                else:
+                    next_latent = trans_output
+
+                self.debug_tensor(next_latent, "Predicted next latent")
+
+                # Decode predicted latent
+                decoded_next = self.encoder_model.decode(next_latent)
+                self.debug_tensor(decoded_next, "Decoded predicted observation")
+
+            print("✅ Model setup completed successfully!")
 
         except Exception as e:
-            print(f"✗ Error loading models: {e}")
-            print("Make sure you have trained models with the same parameters!")
+            print(f"❌ Error loading models: {e}")
             import traceback
             traceback.print_exc()
             raise
@@ -174,20 +191,20 @@ class SimpleModelGUI:
     def setup_environments(self):
         """Setup real environment."""
         self.real_env = make_env(self.args.env_name)
-        print(f"✓ Environment created: {self.args.env_name}")
+        print(f"✅ Environment created: {self.args.env_name}")
 
     def setup_gui(self):
         """Create the GUI interface."""
         self.root = tk.Tk()
-        self.root.title(f"MiniGrid: Real vs Model ({self.args.env_name})")
-        self.root.geometry("700x500")
+        self.root.title(f"DEBUG: MiniGrid Model ({self.args.env_name})")
+        self.root.geometry("800x600")
 
         # Main frame
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill='both', expand=True)
 
         # Title
-        title = ttk.Label(main_frame, text="MiniGrid: Real vs Model Prediction",
+        title = ttk.Label(main_frame, text="DEBUG: MiniGrid Model Prediction Analysis",
                           font=("Arial", 14, "bold"))
         title.pack(pady=(0, 10))
 
@@ -209,6 +226,17 @@ class SimpleModelGUI:
         self.model_canvas = tk.Canvas(model_frame, width=200, height=200, bg="white")
         self.model_canvas.pack()
 
+        # Debug info frame
+        debug_frame = ttk.LabelFrame(main_frame, text="Debug Info", padding="10")
+        debug_frame.pack(pady=10, fill='x')
+
+        self.debug_text = tk.Text(debug_frame, height=8, width=80)
+        scrollbar = ttk.Scrollbar(debug_frame, orient="vertical", command=self.debug_text.yview)
+        self.debug_text.configure(yscrollcommand=scrollbar.set)
+
+        self.debug_text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
         # Info frame
         info_frame = ttk.Frame(main_frame)
         info_frame.pack(pady=10)
@@ -222,7 +250,7 @@ class SimpleModelGUI:
 
         controls_text = (
             "Arrow Keys: ↑=Forward, ←=Turn Left, →=Turn Right, ↓=Stay\n"
-            "R: Reset  |  Q: Quit"
+            "R: Reset  |  Q: Quit  |  T: Test Model"
         )
         ttk.Label(controls_frame, text=controls_text, justify='center').pack()
 
@@ -238,40 +266,77 @@ class SimpleModelGUI:
         self.root.bind('<KeyPress>', self.on_key_press)
         self.root.focus_set()
 
+    def log_debug(self, message):
+        """Add debug message to the debug text widget."""
+        self.debug_text.insert(tk.END, message + "\n")
+        self.debug_text.see(tk.END)
+        print(message)  # Also print to console
+
     def preprocess_obs(self, obs):
-        """Preprocess observation for model input."""
+        """Preprocess observation for model input with debugging."""
         if isinstance(obs, np.ndarray):
             obs = torch.from_numpy(obs).float()
         if len(obs.shape) == 3:
             obs = obs.unsqueeze(0)  # Add batch dimension
         return obs
 
-    def obs_to_display_image(self, obs, size=(200, 200)):
-        """Convert observation to displayable PIL Image."""
-        if isinstance(obs, torch.Tensor):
-            obs = obs.cpu().numpy()
+    def obs_to_display_image(self, obs, size=(200, 200), name=""):
+        """Convert observation to displayable PIL Image with debugging."""
+        try:
+            if isinstance(obs, torch.Tensor):
+                obs_np = obs.detach().cpu().numpy()
+            else:
+                obs_np = obs.copy()
 
-        # Handle different observation formats
-        if len(obs.shape) == 4:  # Batch dimension
-            obs = obs[0]
-        if len(obs.shape) == 3 and obs.shape[0] <= 3:  # CHW format
-            obs = obs.transpose(1, 2, 0)  # Convert to HWC
+            self.log_debug(f"🖼️ Converting {name} to image:")
+            self.log_debug(f"  Input shape: {obs_np.shape}")
+            self.log_debug(f"  Input range: [{obs_np.min():.3f}, {obs_np.max():.3f}]")
 
-        # Ensure values are in [0, 1] range
-        if obs.max() > 1.0:
-            obs = obs / 255.0
-        obs = np.clip(obs, 0, 1)
+            # Handle different observation formats
+            if len(obs_np.shape) == 4:  # Batch dimension
+                obs_np = obs_np[0]
+            if len(obs_np.shape) == 3 and obs_np.shape[0] <= 3:  # CHW format
+                obs_np = obs_np.transpose(1, 2, 0)  # Convert to HWC
 
-        # Convert to PIL Image
-        if len(obs.shape) == 2:  # Grayscale
-            obs = np.stack([obs] * 3, axis=-1)  # Convert to RGB
+            self.log_debug(f"  After reshape: {obs_np.shape}")
 
-        img = Image.fromarray((obs * 255).astype(np.uint8))
-        img = img.resize(size, Image.NEAREST)  # Use nearest neighbor for pixel art
-        return img
+            # Ensure values are in [0, 1] range
+            if obs_np.max() > 1.0:
+                obs_np = obs_np / 1
+                self.log_debug(f"  Normalized by 1")
+
+            obs_np = np.clip(obs_np, 0, 1)
+            self.log_debug(f"  After clipping: [{obs_np.min():.3f}, {obs_np.max():.3f}]")
+
+            # Convert to PIL Image
+            if len(obs_np.shape) == 2:  # Grayscale
+                obs_np = np.stack([obs_np] * 3, axis=-1)  # Convert to RGB
+                self.log_debug(f"  Converted grayscale to RGB")
+
+            # Check for all-zero or all-same values
+            if np.allclose(obs_np, 0):
+                self.log_debug(f"  ⚠️ WARNING: All pixels are zero!")
+            elif np.allclose(obs_np, obs_np.flat[0]):
+                self.log_debug(f"  ⚠️ WARNING: All pixels have same value: {obs_np.flat[0]:.3f}")
+
+            img_array = (obs_np * 255).astype(np.uint8)
+            img = Image.fromarray(img_array)
+            img = img.resize(size, Image.NEAREST)
+
+            self.log_debug(f"  ✅ Image created successfully")
+            return img
+
+        except Exception as e:
+            self.log_debug(f"  ❌ Error creating image: {e}")
+            # Return a red error image
+            error_img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+            error_img[:, :, 0] = 255  # Red
+            return Image.fromarray(error_img)
 
     def reset_environments(self):
         """Reset both real and model environments."""
+        self.log_debug("\n🔄 RESETTING ENVIRONMENTS")
+
         # Reset real environment
         reset_result = self.real_env.reset()
         if isinstance(reset_result, tuple):
@@ -279,26 +344,50 @@ class SimpleModelGUI:
         else:
             self.real_obs = reset_result
 
+        self.debug_tensor(self.real_obs, "Reset real observation")
+
         # Reset model state to match real environment
         self.sync_model_with_real()
 
         self.step_count = 0
         self.update_display()
-        print("Environments reset!")
+        self.log_debug("✅ Reset completed!")
 
     def sync_model_with_real(self):
         """Sync model state with real environment state."""
-        with torch.no_grad():
-            obs_tensor = self.preprocess_obs(self.real_obs).to(self.args.device)
+        self.log_debug("\n🔗 SYNCING MODEL WITH REAL STATE")
 
-            # Encode real observation to get model state
-            self.model_state = self.encoder_model.encode(obs_tensor)
-            if self.args.trans_model_type == 'continuous':
-                self.model_state = self.model_state.reshape(self.model_state.shape[0], -1)
+        try:
+            with torch.no_grad():
+                obs_tensor = self.preprocess_obs(self.real_obs).to(self.args.device)
+                self.debug_tensor(obs_tensor, "Preprocessed observation")
 
-            # Decode to get model observation
-            model_obs_tensor = self.encoder_model.decode(self.model_state)
-            self.model_obs = model_obs_tensor.cpu().numpy()[0]
+                # Encode real observation to get model state
+                self.model_state = self.encoder_model.encode(obs_tensor)
+                self.debug_tensor(self.model_state, "Encoded model state")
+
+                # Reshape for transition model if needed
+                if self.args.trans_model_type == 'continuous':
+                    if hasattr(self.encoder_model, 'latent_dim'):
+                        self.model_state = self.model_state.reshape(self.model_state.shape[0],
+                                                                    self.encoder_model.latent_dim)
+                    else:
+                        self.model_state = self.model_state.reshape(self.model_state.shape[0], -1)
+                    self.debug_tensor(self.model_state, "Reshaped model state for transition model")
+
+                # Decode to get model observation
+                model_obs_tensor = self.encoder_model.decode(self.model_state)
+                self.debug_tensor(model_obs_tensor, "Decoded model observation")
+
+                self.model_obs = model_obs_tensor.cpu().numpy()[0]
+                self.debug_tensor(self.model_obs, "Final model observation (numpy)")
+
+                self.log_debug("✅ Model sync completed!")
+
+        except Exception as e:
+            self.log_debug(f"❌ Error syncing model: {e}")
+            import traceback
+            traceback.print_exc()
 
     def step_real_environment(self, action):
         """Take a step in the real environment."""
@@ -314,35 +403,111 @@ class SimpleModelGUI:
 
     def step_model_prediction(self, action):
         """Get model's prediction for the next state."""
+        self.log_debug(f"\n🎯 PREDICTING NEXT STATE (action={action})")
+
         if self.model_state is None:
+            self.log_debug("❌ No model state available!")
             return
 
-        with torch.no_grad():
-            action_tensor = torch.tensor([action], dtype=torch.long).to(self.args.device)
+        try:
+            with torch.no_grad():
+                action_tensor = torch.tensor([action], dtype=torch.long).to(self.args.device)
+                self.debug_tensor(action_tensor, "Action tensor")
 
-            # Predict next state using transition model
-            next_state_pred = self.trans_model(self.model_state, action_tensor)[0]
+                # Predict next state using transition model
+                trans_output = self.trans_model(self.model_state, action_tensor)
 
-            # Decode predicted state to observation
-            next_obs_pred = self.encoder_model.decode(next_state_pred)
+                if isinstance(trans_output, tuple):
+                    next_state_pred = trans_output[0]
+                    if len(trans_output) > 1:
+                        reward_pred = trans_output[1]
+                        self.debug_tensor(reward_pred, "Predicted reward")
+                else:
+                    next_state_pred = trans_output
 
-            # Update model state and observation
-            self.model_state = next_state_pred
-            self.model_obs = next_obs_pred.cpu().numpy()[0]
+                self.debug_tensor(next_state_pred, "Predicted next state")
+
+                # Decode predicted state to observation
+                next_obs_pred = self.encoder_model.decode(next_state_pred)
+                self.debug_tensor(next_obs_pred, "Decoded predicted observation")
+
+                # Update model state and observation
+                self.model_state = next_state_pred
+                self.model_obs = next_obs_pred.cpu().numpy()[0]
+
+                self.log_debug("✅ Model prediction completed!")
+
+        except Exception as e:
+            self.log_debug(f"❌ Error in model prediction: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def test_model_pipeline(self):
+        """Test the entire model pipeline with current state."""
+        self.log_debug("\n🧪 TESTING MODEL PIPELINE")
+
+        if self.real_obs is None:
+            self.log_debug("❌ No real observation available!")
+            return
+
+        try:
+            # Test encoding -> decoding
+            with torch.no_grad():
+                obs_tensor = self.preprocess_obs(self.real_obs).to(self.args.device)
+                encoded = self.encoder_model.encode(obs_tensor)
+                decoded = self.encoder_model.decode(encoded)
+
+                self.debug_tensor(obs_tensor, "Original observation")
+                self.debug_tensor(encoded, "Encoded")
+                self.debug_tensor(decoded, "Decoded")
+
+                # Check reconstruction quality
+                mse = torch.mean((obs_tensor - decoded) ** 2)
+                self.log_debug(f"Reconstruction MSE: {mse.item():.6f}")
+
+                # Test transition model
+                if hasattr(self.encoder_model, 'latent_dim') and self.args.trans_model_type == 'continuous':
+                    encoded_for_trans = encoded.reshape(encoded.shape[0], self.encoder_model.latent_dim)
+                else:
+                    encoded_for_trans = encoded
+
+                action_tensor = torch.tensor([2], dtype=torch.long).to(self.args.device)  # Forward
+                trans_output = self.trans_model(encoded_for_trans, action_tensor)
+
+                if isinstance(trans_output, tuple):
+                    next_encoded = trans_output[0]
+                else:
+                    next_encoded = trans_output
+
+                next_decoded = self.encoder_model.decode(next_encoded)
+
+                self.debug_tensor(next_encoded, "Transition output")
+                self.debug_tensor(next_decoded, "Transition decoded")
+
+                # Check if transition changed anything
+                change = torch.mean(torch.abs(decoded - next_decoded))
+                self.log_debug(f"Transition change magnitude: {change.item():.6f}")
+
+                self.log_debug("✅ Pipeline test completed!")
+
+        except Exception as e:
+            self.log_debug(f"❌ Pipeline test failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def update_display(self):
         """Update the GUI display with current observations."""
         try:
             # Update real environment image
             if self.real_obs is not None:
-                real_img = self.obs_to_display_image(self.real_obs)
+                real_img = self.obs_to_display_image(self.real_obs, name="real")
                 self.real_photo = ImageTk.PhotoImage(real_img)
                 self.real_canvas.delete("all")
                 self.real_canvas.create_image(100, 100, image=self.real_photo)
 
             # Update model prediction image
             if self.model_obs is not None:
-                model_img = self.obs_to_display_image(self.model_obs)
+                model_img = self.obs_to_display_image(self.model_obs, name="model")
                 self.model_photo = ImageTk.PhotoImage(model_img)
                 self.model_canvas.delete("all")
                 self.model_canvas.create_image(100, 100, image=self.model_photo)
@@ -351,7 +516,7 @@ class SimpleModelGUI:
             self.step_label.config(text=f"Steps: {self.step_count}")
 
         except Exception as e:
-            print(f"Error updating display: {e}")
+            self.log_debug(f"❌ Error updating display: {e}")
 
     def on_key_press(self, event):
         """Handle keyboard input."""
@@ -361,31 +526,38 @@ class SimpleModelGUI:
             self.quit_app()
         elif key == 'r' or key == 'R':
             self.reset_environments()
+        elif key == 't' or key == 'T':
+            self.test_model_pipeline()
         elif key in self.action_map:
             self.take_action(self.action_map[key])
 
     def take_action(self, action):
         """Execute an action in both environments."""
+        self.log_debug(f"\n🎮 TAKING ACTION: {action}")
+
         try:
             # Step real environment
             reward, done, info = self.step_real_environment(action)
+            self.debug_tensor(self.real_obs, "New real observation")
 
             # Step model prediction
             self.step_model_prediction(action)
 
             self.step_count += 1
-            print(f"Action {action}, Step {self.step_count}, Reward: {reward:.2f}")
+            self.log_debug(f"Step {self.step_count} completed, Reward: {reward:.2f}")
 
             # Update display
             self.update_display()
 
             # Check if episode is done
             if done:
-                print(f"Episode finished! Steps taken: {self.step_count}")
-                self.root.after(2000, self.reset_environments)
+                self.log_debug(f"🏁 Episode finished! Steps taken: {self.step_count}")
+                self.root.after(3000, self.reset_environments)
 
         except Exception as e:
-            print(f"Error taking action: {e}")
+            self.log_debug(f"❌ Error taking action: {e}")
+            import traceback
+            traceback.print_exc()
 
     def quit_app(self):
         """Clean up and quit the application."""
@@ -398,9 +570,8 @@ class SimpleModelGUI:
 
     def run(self):
         """Start the GUI application."""
-        print("🎮 Starting GUI...")
-        print("Use arrow keys to control the agent!")
-        print("Press 'R' to reset, 'Q' to quit")
+        print("🎮 Starting DEBUG GUI...")
+        print("Controls: Arrow keys, R=reset, Q=quit, T=test model")
 
         try:
             self.root.mainloop()
@@ -412,7 +583,7 @@ class SimpleModelGUI:
 
 def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description="Simple MiniGrid Model GUI")
+    parser = argparse.ArgumentParser(description="Debug MiniGrid Model GUI")
     parser.add_argument('--env_name', type=str, default='MiniGrid-Empty-6x6-v0')
     parser.add_argument('--ae_model_type', type=str, default='ae')
     parser.add_argument('--latent_dim', type=int, default=32)
@@ -420,14 +591,14 @@ def main():
 
     args = parser.parse_args()
 
-    print(f"🚀 Launching GUI:")
+    print(f"🚀 Launching DEBUG GUI:")
     print(f"  Environment: {args.env_name}")
     print(f"  Model: {args.ae_model_type}")
     print(f"  Latent Dim: {args.latent_dim}")
     print(f"  Device: {args.device}")
 
     try:
-        app = SimpleModelGUI(args.env_name, args.ae_model_type, args.latent_dim, args.device)
+        app = DebugModelGUI(args.env_name, args.ae_model_type, args.latent_dim, args.device)
         app.run()
     except Exception as e:
         print(f"❌ Error: {e}")
