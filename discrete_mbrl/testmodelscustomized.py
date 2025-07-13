@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Debug version to find why model predictions are black
+Debug version to find why model predictions are black - FIXED VERSION
 """
 
 import sys
@@ -27,7 +27,16 @@ def create_simple_args(env_name, ae_model_type, latent_dim, device='cpu', **kwar
     # Basic settings
     args.env_name = check_env_name(env_name)
     args.ae_model_type = ae_model_type
-    args.trans_model_type = kwargs.get('trans_model_type', 'continuous')
+
+    # FIXED: Set appropriate transition model type based on encoder type
+    if ae_model_type in ['vqvae', 'dae', 'softmax_ae', 'hard_fta_ae']:
+        default_trans_type = 'discrete'
+    elif ae_model_type in ['soft_vqvae']:
+        default_trans_type = 'shared_vq'
+    else:
+        default_trans_type = 'continuous'
+
+    args.trans_model_type = kwargs.get('trans_model_type', default_trans_type)
     args.device = device
     args.load = True
 
@@ -79,6 +88,8 @@ class DebugModelGUI:
         print(f"🔍 DEBUG: Initializing GUI with: {env_name}, {ae_model_type}, latent_dim={latent_dim}")
 
         self.args = create_simple_args(env_name, ae_model_type, latent_dim, device, **kwargs)
+        print(f"🔍 Using transition model type: {self.args.trans_model_type}")
+
         self.setup_models()
         self.setup_environments()
         self.setup_gui()
@@ -131,6 +142,15 @@ class DebugModelGUI:
             self.encoder_model = self.encoder_model.to(self.args.device)
             self.encoder_model.eval()
 
+            # Print encoder model info
+            print(f"🔍 Encoder model type: {type(self.encoder_model).__name__}")
+            if hasattr(self.encoder_model, 'latent_dim'):
+                print(f"🔍 Encoder latent_dim: {self.encoder_model.latent_dim}")
+            if hasattr(self.encoder_model, 'n_latent_embeds'):
+                print(f"🔍 Encoder n_latent_embeds: {self.encoder_model.n_latent_embeds}")
+            if hasattr(self.encoder_model, 'n_embeddings'):
+                print(f"🔍 Encoder n_embeddings: {self.encoder_model.n_embeddings}")
+
             # Test encoder with dummy observation
             print("🔍 Testing encoder with dummy observation...")
             with torch.no_grad():
@@ -151,18 +171,11 @@ class DebugModelGUI:
             self.trans_model.eval()
             temp_env.close()
 
-            # Test transition model
+            # Test transition model with proper latent format
             print("🔍 Testing transition model...")
             with torch.no_grad():
-                # Prepare latent state for transition model
-                if self.args.trans_model_type == 'continuous':
-                    if hasattr(self.encoder_model, 'latent_dim'):
-                        latent_for_trans = encoded.reshape(encoded.shape[0], self.encoder_model.latent_dim)
-                    else:
-                        latent_for_trans = encoded.reshape(encoded.shape[0], -1)
-                else:
-                    latent_for_trans = encoded
-
+                # FIXED: Prepare latent state based on transition model type
+                latent_for_trans = self.prepare_latent_for_transition(encoded)
                 self.debug_tensor(latent_for_trans, "Latent for transition model")
 
                 # Test transition prediction
@@ -187,6 +200,34 @@ class DebugModelGUI:
             import traceback
             traceback.print_exc()
             raise
+
+    def prepare_latent_for_transition(self, encoded):
+        """FIXED: Prepare encoded latent for transition model based on model types."""
+        if self.args.trans_model_type == 'continuous':
+            # For continuous transition models, reshape to flat latent vector
+            if hasattr(self.encoder_model, 'latent_dim'):
+                try:
+                    return encoded.reshape(encoded.shape[0], self.encoder_model.latent_dim)
+                except RuntimeError as e:
+                    print(f"⚠️ Reshape failed with latent_dim, using flatten: {e}")
+                    return encoded.reshape(encoded.shape[0], -1)
+            else:
+                return encoded.reshape(encoded.shape[0], -1)
+
+        elif self.args.trans_model_type in ['discrete', 'shared_vq', 'universal_vq']:
+            # For discrete transition models, use encoded as-is or reshape appropriately
+            if len(encoded.shape) == 4:  # (batch, channels, height, width)
+                # Flatten spatial dimensions but keep embedding dimension
+                return encoded.reshape(encoded.shape[0], -1, encoded.shape[1])
+            elif len(encoded.shape) == 3:  # (batch, n_embeds, embed_dim) or similar
+                return encoded
+            else:
+                # Fallback to original shape
+                return encoded
+
+        else:
+            # Default: return as-is
+            return encoded
 
     def setup_environments(self):
         """Setup real environment."""
@@ -243,6 +284,11 @@ class DebugModelGUI:
 
         self.step_label = ttk.Label(info_frame, text="Steps: 0", font=("Arial", 12))
         self.step_label.pack()
+
+        # Model info label
+        model_info = f"Model: {self.args.ae_model_type} + {self.args.trans_model_type}"
+        self.model_label = ttk.Label(info_frame, text=model_info, font=("Arial", 10))
+        self.model_label.pack()
 
         # Controls frame
         controls_frame = ttk.LabelFrame(main_frame, text="Controls", padding="10")
@@ -302,8 +348,8 @@ class DebugModelGUI:
 
             # Ensure values are in [0, 1] range
             if obs_np.max() > 1.0:
-                obs_np = obs_np / 1
-                self.log_debug(f"  Normalized by 1")
+                obs_np = obs_np / 255.0
+                self.log_debug(f"  Normalized by 255")
 
             obs_np = np.clip(obs_np, 0, 1)
             self.log_debug(f"  After clipping: [{obs_np.min():.3f}, {obs_np.max():.3f}]")
@@ -363,20 +409,15 @@ class DebugModelGUI:
                 self.debug_tensor(obs_tensor, "Preprocessed observation")
 
                 # Encode real observation to get model state
-                self.model_state = self.encoder_model.encode(obs_tensor)
-                self.debug_tensor(self.model_state, "Encoded model state")
+                encoded = self.encoder_model.encode(obs_tensor)
+                self.debug_tensor(encoded, "Encoded model state")
 
-                # Reshape for transition model if needed
-                if self.args.trans_model_type == 'continuous':
-                    if hasattr(self.encoder_model, 'latent_dim'):
-                        self.model_state = self.model_state.reshape(self.model_state.shape[0],
-                                                                    self.encoder_model.latent_dim)
-                    else:
-                        self.model_state = self.model_state.reshape(self.model_state.shape[0], -1)
-                    self.debug_tensor(self.model_state, "Reshaped model state for transition model")
+                # FIXED: Use proper latent preparation
+                self.model_state = self.prepare_latent_for_transition(encoded)
+                self.debug_tensor(self.model_state, "Prepared model state for transition model")
 
                 # Decode to get model observation
-                model_obs_tensor = self.encoder_model.decode(self.model_state)
+                model_obs_tensor = self.encoder_model.decode(encoded)
                 self.debug_tensor(model_obs_tensor, "Decoded model observation")
 
                 self.model_obs = model_obs_tensor.cpu().numpy()[0]
@@ -466,13 +507,9 @@ class DebugModelGUI:
                 self.log_debug(f"Reconstruction MSE: {mse.item():.6f}")
 
                 # Test transition model
-                if hasattr(self.encoder_model, 'latent_dim') and self.args.trans_model_type == 'continuous':
-                    encoded_for_trans = encoded.reshape(encoded.shape[0], self.encoder_model.latent_dim)
-                else:
-                    encoded_for_trans = encoded
-
+                latent_for_trans = self.prepare_latent_for_transition(encoded)
                 action_tensor = torch.tensor([2], dtype=torch.long).to(self.args.device)  # Forward
-                trans_output = self.trans_model(encoded_for_trans, action_tensor)
+                trans_output = self.trans_model(latent_for_trans, action_tensor)
 
                 if isinstance(trans_output, tuple):
                     next_encoded = trans_output[0]
@@ -586,7 +623,12 @@ def main():
     parser = argparse.ArgumentParser(description="Debug MiniGrid Model GUI")
     parser.add_argument('--env_name', type=str, default='MiniGrid-Empty-6x6-v0')
     parser.add_argument('--ae_model_type', type=str, default='ae')
+    parser.add_argument('--trans_model_type', type=str, default=None,
+                        help='Override transition model type (auto-detected if not specified)')
     parser.add_argument('--latent_dim', type=int, default=32)
+    parser.add_argument('--codebook_size', type=int, default=16)
+    parser.add_argument('--filter_size', type=int, default=8)
+    parser.add_argument('--embedding_dim', type=int, default=64)
     parser.add_argument('--device', type=str, default='cpu')
 
     args = parser.parse_args()
@@ -595,10 +637,22 @@ def main():
     print(f"  Environment: {args.env_name}")
     print(f"  Model: {args.ae_model_type}")
     print(f"  Latent Dim: {args.latent_dim}")
+    print(f"  Codebook Size: {args.codebook_size}")
+    print(f"  Filter Size: {args.filter_size}")
+    print(f"  Embedding Dim: {args.embedding_dim}")
     print(f"  Device: {args.device}")
 
+    kwargs = {
+        'codebook_size': args.codebook_size,
+        'filter_size': args.filter_size,
+        'embedding_dim': args.embedding_dim,
+    }
+
+    if args.trans_model_type:
+        kwargs['trans_model_type'] = args.trans_model_type
+
     try:
-        app = DebugModelGUI(args.env_name, args.ae_model_type, args.latent_dim, args.device)
+        app = DebugModelGUI(args.env_name, args.ae_model_type, args.latent_dim, args.device, **kwargs)
         app.run()
     except Exception as e:
         print(f"❌ Error: {e}")
